@@ -346,3 +346,31 @@ def test_api_hr_hiring_interns_offline_returns_503(tmp_path, monkeypatch):
             assert client.get("/api/interns/1042").status_code == 503
     finally:
         llm.set_backend(None)
+
+
+def test_live_mongodb_schema_and_seeding_when_mongod_running(monkeypatch):
+    talent_hub.close()
+    if not talent_hub.mongo_health()["ok"]:
+        pytest.skip("Local mongod is not running")
+
+    from pymongo import MongoClient
+    from pymongo.errors import WriteError
+
+    temp_db = "slt_talent_hub_pytest"
+    monkeypatch.setattr(config, "TALENT_HUB_DB_NAME", temp_db)
+    talent_hub.close()
+    client = MongoClient(config.TALENT_HUB_MONGO_URI, serverSelectionTimeoutMS=2000)
+    try:
+        client.drop_database(temp_db)
+        res = talent_hub.seed_sample_interns(100)
+        assert res["total"] == 100
+        kamal = talent_hub.mongo_get_intern("1042")
+        assert kamal is not None and kamal["Trainee_Name"] == "Kamal Perera"
+        assert kamal["Training_StartDate"] == "2025-01-01T00:00:00.000Z"
+
+        with pytest.raises(WriteError):
+            client[temp_db][config.TALENT_HUB_COLLECTION].insert_one({"Trainee_ID": "BAD"})
+    finally:
+        talent_hub.close()
+        client.drop_database(temp_db)
+        client.close()

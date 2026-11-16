@@ -114,27 +114,54 @@ HR officer adds a CV
 | Agent schedule | `employees/<agent>/SCHEDULE.md` |
 | Model | The model name in `start_model.sh` (any GGUF model on Hugging Face, for example a Qwen3 4B Instruct build) |
 | App port | `APP_PORT` in `hiring/config.py` |
+| TalentHub API & sample MongoDB | `TALENT_HUB_*` env vars / `hiring/config.py` |
 
 To reset all data, stop the app and delete the `data` folder.
+
+## TalentHub Sample MongoDB & Read-Only API
+
+Until access to the live **SLT TalentHub** API is configured, this branch provides a sample MongoDB database (`slt_talent_hub_sample.interns`) matching TalentHub's schema (`Trainee_ID`, `Trainee_Name`, `Training_StartDate`, `Training_EndDate`, `field_of_spec_name`) and a local Bearer-authenticated read-only mock API (`http://127.0.0.1:5050/api`, avoiding macOS AirPlay's default port `5000`).
+
+1. Ensure MongoDB is running locally on `127.0.0.1:27017` and seed 100 sample intern records:
+
+```bash
+.venv/bin/python scripts/seed_talent_hub.py
+```
+
+2. Start the local mock TalentHub server in a separate terminal:
+
+```bash
+./start_talent_hub.sh
+```
+
+3. Verify from `hr-hiring` CLI or HTTP endpoints (`/api/state`, `/api/interns`, `/api/interns/1042`):
+
+```bash
+.venv/bin/python run.py interns
+```
+
+To switch to the real TalentHub service later, set `TALENT_HUB_API_URL` (e.g. `https://talenthub.slt.lk/api`) and `TALENT_HUB_API_TOKEN` in the environment. Optional sample MongoDB overrides: `TALENT_HUB_MONGO_URI`, `TALENT_HUB_DB_NAME`, `TALENT_HUB_COLLECTION`.
 
 ## Project structure
 
 ```
-setup.sh, start_model.sh, start_app.sh   setup and start scripts
+setup.sh, start_model.sh, start_app.sh, start_talent_hub.sh   setup and start scripts
 app.py                                   web app entry point
-run.py                                   CLI helpers: check, samples, once, brief, status
+run.py                                   CLI helpers: check, samples, once, brief, status, seed-talent-hub, interns
 employees/                               the 4 AI agents (Markdown)
 shared/areas.json                        starter areas
 hiring/
-  config.py     settings               db.py         database (SQLite)
-  llm.py        llama-server client    checks.py     checks on model answers
+  config.py     settings               db.py              database (SQLite)
+  llm.py        llama-server client    checks.py          checks on model answers
+  talent_hub.py TalentHub API & Mongo  talent_hub_mock.py local TalentHub mock API
   tools.py      CV reading, scoring, scheduling, templates
   employees.py  loads agent folders, checked model calls
   flows.py      LangGraph workflows    scheduler.py  APScheduler jobs
   actions.py    user actions           server.py     FastAPI routes
+scripts/                                 dataset importers & TalentHub seeder
 web/                                     front end (HTML, CSS, JavaScript)
 samples/                                 sample CVs (fictional people)
-tests/                                   tests and a fake model server
+tests/                                   tests, fake model, and TalentHub test doubles
 data/                                    created at runtime: database, inbox, outbox, logs, notes
 ```
 

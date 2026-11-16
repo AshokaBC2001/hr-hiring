@@ -93,7 +93,8 @@ TALENT_HUB_MONGO_URI = os.environ.get("TALENT_HUB_MONGO_URI", "mongodb://127.0.0
 TALENT_HUB_DB_NAME = os.environ.get("TALENT_HUB_DB_NAME", "slt_talent_hub_sample")
 TALENT_HUB_COLLECTION = os.environ.get("TALENT_HUB_COLLECTION", "interns")
 TALENT_HUB_TIMEOUT_MS = int(os.environ.get("TALENT_HUB_TIMEOUT_MS", "2000"))
-TALENT_HUB_API_URL = os.environ.get("TALENT_HUB_API_URL", "http://127.0.0.1:5000/api").rstrip("/")
+TALENT_HUB_API_URL = os.environ.get("TALENT_HUB_API_URL", "http://127.0.0.1:5050/api").rstrip("/")
 TALENT_HUB_API_TOKEN = os.environ.get("TALENT_HUB_API_TOKEN", "talenthub-local-dev-token")
 TALENT_HUB_MOCK_HOST = os.environ.get("TALENT_HUB_MOCK_HOST", "127.0.0.1")
-TALENT_HUB_MOCK_PORT = int(os.environ.get("TALENT_HUB_MOCK_PORT", "5000"))
+# Default to 5050 rather than 5000 because macOS AirPlay Receiver (ControlCenter) listens on 5000.
+TALENT_HUB_MOCK_PORT = int(os.environ.get("TALENT_HUB_MOCK_PORT", "5050"))

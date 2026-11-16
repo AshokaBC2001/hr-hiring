@@ -49,7 +49,7 @@
 - `TALENT_HUB_MONGO_URI`: `mongodb://127.0.0.1:27017`
 - `TALENT_HUB_DB_NAME`: `slt_talent_hub_sample`
 - `TALENT_HUB_COLLECTION`: `interns`
-- `TALENT_HUB_API_URL`: `http://127.0.0.1:5000/api`
+- `TALENT_HUB_API_URL`: `http://127.0.0.1:5050/api` (defaults to 5050 locally to avoid macOS AirPlay Receiver on port 5000; overridable via env)
 - `TALENT_HUB_API_TOKEN`: `talenthub-local-dev-token`
-- `TALENT_HUB_MOCK_PORT`: `5000`
+- `TALENT_HUB_MOCK_PORT`: `5050`
 - PyMongo client pool: `maxPoolSize=10`, `minPoolSize=0`, `maxIdleTimeMS=300000`, `connectTimeoutMS=3000`, `serverSelectionTimeoutMS=2000`, `socketTimeoutMS=10000`, `tz_aware=True`.

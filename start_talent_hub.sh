@@ -1,5 +1,5 @@
 #!/bin/bash
-# Starts the local read-only mock SLT TalentHub API on http://127.0.0.1:5000/api
+# Starts the local read-only mock SLT TalentHub API on http://127.0.0.1:5050/api
 cd "$(dirname "$0")"
 if [ ! -x .venv/bin/python ]; then
   echo "Run ./setup.sh first."

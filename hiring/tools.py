@@ -17,6 +17,12 @@ from . import config
 from .checks import EMAIL_RE, CVText, norm
 
 # ---- Reading CV files -----------------------------------------------------------
+_PDF_LIGATURES = str.maketrans({
+    "\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl",
+    "\ufb03": "ffi", "\ufb04": "ffl", "\u200b": "", "\ufeff": "",
+})
+
+
 def read_cv(path: Path) -> str:
     suffix = path.suffix.lower()
     text = ""
@@ -34,6 +40,7 @@ def read_cv(path: Path) -> str:
         text = "\n".join(parts)
     elif suffix == ".txt":
         text = path.read_bytes().decode("utf-8", errors="replace")
+    text = text.translate(_PDF_LIGATURES)
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
     text = re.sub(r"[  ]+", " ", text)
     text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
@@ -104,7 +111,7 @@ def rule_profile(cv_text: str, vocab: list[str]) -> dict:
             break
     m = EMAIL_RE.search(cv_text)
     phone = ""
-    pm = re.search(r"(\+?\d[\d\s\-]{8,}\d)", cv_text)
+    pm = re.search(r"(\+?\d[\d\s\-().]{7,}\d)", cv_text)
     if pm:
         phone = pm.group(1).strip()
     skills = [s for s in vocab if cv.has(s)]
@@ -123,26 +130,53 @@ def rule_profile(cv_text: str, vocab: list[str]) -> dict:
 
 
 # ---- Scoring ---------------------------------------------------------------------------
+_SKILL_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "microsoft excel": ("ms excel", "excel"),
+    "microsoft powerpoint": ("ms powerpoint", "powerpoint"),
+    "ci cd": ("cicd", "continuous integration", "continuous delivery"),
+    "rest api": ("restful api", "rest apis", "restful apis"),
+    "ui design": ("ui ux", "user interface design"),
+}
+
+
+def _has_skill(cv: CVText, skill: str) -> bool:
+    if cv.has(skill):
+        return True
+    for alt in _SKILL_SYNONYMS.get(norm(skill), ()):
+        if cv.has(alt):
+            return True
+    return False
+
+
 def _area_terms(area) -> list[str]:
     return list(area.required_skills or []) + list(area.preferred_skills or []) + list(area.keywords or [])
 
 
-def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[str]]:
+def score_cv(
+    profile: dict,
+    cv_text: str,
+    area,
+    *,
+    cv: CVText | None = None,
+    proj_cvs: list[CVText] | None = None,
+    exp_cvs: list[CVText] | None = None,
+) -> tuple[int | None, dict, list[str]]:
     """Weighted score out of 100 against one area. Returns (score, parts, gaps).
     The score is None when the area has no required skills yet."""
     w = config.WEIGHTS
     required = list(area.required_skills or [])
     if not required:
         return None, {}, []
-    cv = CVText(cv_text)
-    found = [s for s in required if cv.has(s)]
+    cv = cv or CVText(cv_text)
+    found = [s for s in required if _has_skill(cv, s)]
     gaps = [s for s in required if s not in found]
-    preferred_found = [s for s in (area.preferred_skills or []) if cv.has(s)]
+    preferred_found = [s for s in (area.preferred_skills or []) if _has_skill(cv, s)]
     skills_pts = w["skills"] * len(found) / len(required)
 
     terms = _area_terms(area)
     projects = profile.get("projects") or []
-    relevant_projects = [p for p in projects if any(CVText(p).has(t) for t in terms)]
+    p_cvs = proj_cvs if proj_cvs is not None else [CVText(p) for p in projects]
+    relevant_projects = [p_cv.raw for p_cv in p_cvs if any(_has_skill(p_cv, t) for t in terms)]
     projects_pts = w["projects"] * min(len(relevant_projects), 2) / 2
 
     education = " ".join(profile.get("education") or [])
@@ -155,7 +189,8 @@ def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[
         edu_pts, edu_why = 0, "No education found in the CV"
 
     experience = profile.get("experience") or []
-    relevant_exp = [e for e in experience if any(CVText(e).has(t) for t in terms)]
+    e_cvs = exp_cvs if exp_cvs is not None else [CVText(e) for e in experience]
+    relevant_exp = [e_cv.raw for e_cv in e_cvs if any(_has_skill(e_cv, t) for t in terms)]
     if relevant_exp:
         exp_pts, exp_why = w["experience"], "Has related work experience"
     elif experience:
@@ -176,11 +211,20 @@ def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[
     return total, parts, gaps
 
 
+def _prepared_cv(profile: dict, cv_text: str) -> tuple[CVText, list[CVText], list[CVText]]:
+    return (
+        CVText(cv_text),
+        [CVText(p) for p in (profile.get("projects") or [])],
+        [CVText(e) for e in (profile.get("experience") or [])],
+    )
+
+
 def score_all_areas(profile: dict, cv_text: str, areas: list) -> dict:
-    """Scores the CV against every active area. Returns {area name: {score, parts, gaps}}."""
+    """Scores the CV against every active area using pre-tokenized CV structures."""
+    cv, proj_cvs, exp_cvs = _prepared_cv(profile, cv_text)
     out = {}
     for a in areas:
-        total, parts, gaps = score_cv(profile, cv_text, a)
+        total, parts, gaps = score_cv(profile, cv_text, a, cv=cv, proj_cvs=proj_cvs, exp_cvs=exp_cvs)
         if total is not None:
             out[a.name] = {"score": total, "parts": parts, "gaps": gaps}
     return out
@@ -206,13 +250,13 @@ def shortlist_status(score: int) -> str:
 def best_area_by_rules(profile: dict, cv_text: str, areas: list) -> tuple[str, int, float]:
     """The area with the highest score by rules. Returns (name, score, share of required skills found)."""
     best = ("", -1, 0.0)
-    cv = CVText(cv_text)
+    cv, proj_cvs, exp_cvs = _prepared_cv(profile, cv_text)
     for a in areas:
-        total, _, _ = score_cv(profile, cv_text, a)
+        total, _, gaps = score_cv(profile, cv_text, a, cv=cv, proj_cvs=proj_cvs, exp_cvs=exp_cvs)
         if total is None:
             continue
         req = a.required_skills or []
-        share = sum(1 for s in req if cv.has(s)) / len(req)
+        share = (len(req) - len(gaps)) / len(req)
         if total > best[1]:
             best = (a.name, total, share)
     return best

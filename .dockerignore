@@ -1,0 +1,14 @@
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+.DS_Store
+screenshots/
+.env
+.env.local
+data/register.db*
+data/inbox/
+data/outbox/
+data/run-logs/
+data/notes/

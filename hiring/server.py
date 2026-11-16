@@ -6,21 +6,23 @@ that come from other websites. Two roles use it, chosen at the top of the page:
 """
 from __future__ import annotations
 
+import base64
 import csv
+import hmac
 import io
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
-from . import actions, config, db, flows, llm, mailer, scheduler, talent_hub, tools, vacancies
+from . import actions, config, db, flows, llm, mailer, scheduler, supervisor, talent_hub, tools, vacancies
 from .employees import EMPLOYEES, lessons, role_summary, routines, schedule
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 
 @asynccontextmanager
@@ -31,19 +33,93 @@ async def lifespan(app: FastAPI):
     yield
     scheduler.stop()
     talent_hub.close()
+    llm.close()
 
 
 app = FastAPI(title="HR Hiring", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "testserver"])
+
+
+def _strip_host_port(raw: str) -> str:
+    val = (raw or "").split(",", 1)[0].strip().lower()
+    if val.startswith("["):
+        return val.split("]", 1)[0] + "]"
+    return val.split(":", 1)[0]
+
+
+def _host_allowed(host_header: str) -> bool:
+    allowed = config.ALLOWED_HOSTS
+    if "*" in allowed:
+        return True
+    host = _strip_host_port(host_header)
+    if not host:
+        return False
+    for pattern in allowed:
+        p = pattern.lower()
+        if p == host or (p.startswith(".") and (host.endswith(p) or host == p.lstrip("."))):
+            return True
+    return False
+
+
+def _origin_allowed(origin: str, request: Request) -> bool:
+    orig = origin.strip().lower()
+    if orig in config.ALLOWED_ORIGINS:
+        return True
+    parsed = urlparse(orig)
+    orig_host = (parsed.hostname or "").lower()
+    if not orig_host:
+        return False
+    trusted_hosts = {"localhost", "127.0.0.1", "::1"}
+    for h in (request.headers.get("host"), request.headers.get("x-forwarded-host")):
+        stripped = _strip_host_port(h or "").strip("[]")
+        if stripped:
+            trusted_hosts.add(stripped)
+    for item in config.ALLOWED_ORIGINS:
+        p_host = (urlparse(item).hostname or item).lower()
+        if p_host:
+            trusted_hosts.add(p_host)
+    return orig_host in trusted_hosts
+
+
+def _check_auth(request: Request) -> Response | None:
+    if request.url.path == "/api/health":
+        return None
+    has_basic = bool(config.AUTH_USER and config.AUTH_PASS)
+    has_token = bool(config.ACCESS_TOKEN)
+    if not has_basic and not has_token:
+        return None
+    auth = request.headers.get("authorization", "")
+    token_hdr = request.headers.get("x-access-token", "").strip()
+    if has_token:
+        if auth.lower().startswith("bearer ") and hmac.compare_digest(auth[7:].strip(), config.ACCESS_TOKEN):
+            return None
+        if token_hdr and hmac.compare_digest(token_hdr, config.ACCESS_TOKEN):
+            return None
+    if has_basic and auth.lower().startswith("basic "):
+        try:
+            decoded = base64.b64decode(auth[6:].strip()).decode("utf-8", errors="strict")
+            user, password = decoded.split(":", 1)
+            if hmac.compare_digest(user, config.AUTH_USER) and hmac.compare_digest(password, config.AUTH_PASS):
+                return None
+        except Exception:
+            pass
+    headers = {"WWW-Authenticate": 'Basic realm="HR Hiring"'} if has_basic else {}
+    return JSONResponse({"detail": "Authentication required."}, status_code=401, headers=headers)
 
 
 @app.middleware("http")
-async def same_site_only(request: Request, call_next):
+async def hosting_and_security_guard(request: Request, call_next):
+    if not _host_allowed(request.headers.get("host", "")):
+        return PlainTextResponse("Invalid host header", status_code=400)
+    auth_resp = _check_auth(request)
+    if auth_resp is not None:
+        return auth_resp
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
-        if origin and origin.split("://", 1)[-1].split(":")[0] not in ("localhost", "127.0.0.1"):
+        if origin and not _origin_allowed(origin, request):
             return JSONResponse({"detail": "Requests from other websites are not allowed."}, status_code=403)
     response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     return response
@@ -75,11 +151,8 @@ def _need_role(request: Request, role: str) -> None:
 
 
 def _kick() -> None:
-    """After a person acts, let the employees pick up the work straight away."""
-    if config.SCHEDULER_ENABLED and not flows.WORK_LOCK.locked():
-        flows.start_background(flows.run_all_once)
-    if config.SCHEDULER_ENABLED:
-        flows.start_background(vacancies.suggest_for_open)
+    """After a person acts, coalesce employee + vacancy updates on a background thread."""
+    flows.kick_background()
 
 
 # ---- serialising -------------------------------------------------------------------------
@@ -158,9 +231,15 @@ def state():
             .where(db.Draft.status == "released")
             .group_by(db.Draft.delivery_status)
         ).all())
-        flagged = sum(1 for c in s.scalars(select(db.Candidate).where(db.Candidate.status.not_in({"closed", "archived"}),
-                                                                       db.Candidate.status.not_in(config.HR_STATUSES)))
-                      if any(f.get("open") for f in (c.flags or [])))
+        flagged = sum(
+            1 for fl in s.scalars(
+                select(db.Candidate.flags).where(
+                    db.Candidate.status.not_in({"closed", "archived"}),
+                    db.Candidate.status.not_in(config.HR_STATUSES),
+                )
+            )
+            if any(f.get("open") for f in (fl or []))
+        )
         selected = s.scalar(select(func.count(db.Candidate.id)).where(db.Candidate.work_id.is_not(None))) or 0
         recent = list(s.execute(select(db.Event, db.Candidate.app_no, db.Candidate.name)
                                 .join(db.Candidate, db.Candidate.id == db.Event.candidate_id, isouter=True)
@@ -273,10 +352,12 @@ def review():
             "suggested_areas": [{"name": k, "app_nos": v} for k, v in suggested.items()]}
 
 
-def _vacancy_json(v: db.Vacancy) -> dict:
+def _vacancy_json(v: db.Vacancy, cand_map: dict[str, db.Candidate] | None = None) -> dict:
+    if cand_map is None:
+        cand_map = db.get_candidates_by_app_nos([s_["app_no"] for s_ in (v.suggestions or [])])
     rows = []
     for s_ in (v.suggestions or []):
-        c = db.get_candidate(s_["app_no"])
+        c = cand_map.get(s_["app_no"])
         rows.append({**s_, "state_label": vacancies.STATE_LABELS.get(s_["state"], s_["state"]),
                      "status_label": _status(c)["status_label"] if c else "",
                      "result": c.result if c else "", "work_id": c.work_id if c else None})
@@ -290,8 +371,15 @@ def _vacancy_json(v: db.Vacancy) -> dict:
 def list_vacancies(show: str = "open"):
     wanted = {"open"} if show == "open" else ({"filled", "closed"} if show == "done" else
                                               {"open", "filled", "closed"})
-    rows = [_vacancy_json(v) for v in db.vacancies_in(wanted)]
-    counts = {k: len(db.vacancies_in(k)) for k in ("open", "filled", "closed")}
+    vacs = db.vacancies_in(wanted)
+    cand_map = db.get_candidates_by_app_nos(
+        [s_["app_no"] for v in vacs for s_ in (v.suggestions or [])]
+    )
+    rows = [_vacancy_json(v, cand_map=cand_map) for v in vacs]
+    with db.Session() as s:
+        raw_counts = dict(s.execute(select(db.Vacancy.status, func.count(db.Vacancy.id))
+                                    .group_by(db.Vacancy.status)).all())
+    counts = {k: raw_counts.get(k, 0) for k in ("open", "filled", "closed")}
     return {"rows": rows, "counts": counts, "show": show,
             "areas": [a.name for a in db.active_areas()],
             "reserves": config.VACANCY_RESERVES, "notice_days": config.VACANCY_NOTICE_DAYS}
@@ -475,7 +563,7 @@ def list_interns(specialization: str = "", show: str = "all", q: str = "", limit
         "total": len(rows),
         "stats": stats,
         "show": show,
-        "source": "mongodb_api" if talent_hub._backend is None else "test",
+        "source": "test" if talent_hub._backend is not None else talent_hub.resolve_mode(),
         "notice_days": config.VACANCY_NOTICE_DAYS,
     }
 
@@ -701,6 +789,68 @@ async def test_email(request: Request):
     return res
 
 
+def _csv_cell(val: object) -> str:
+    txt = "" if val is None else str(val)
+    if txt and txt[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + txt
+    return txt
+
+
+@app.get("/api/health")
+def health_probe():
+    with db.Session() as s:
+        integrity = str(s.connection().exec_driver_sql("PRAGMA quick_check").scalar() or "")
+    ok = integrity == "ok"
+    payload = {
+        "ok": ok,
+        "version": VERSION,
+        "sqlite": integrity,
+        "talenthub_mode": talent_hub.resolve_mode(),
+        "scheduler": config.SCHEDULER_ENABLED,
+    }
+    return JSONResponse(payload, status_code=200 if ok else 503)
+
+
+@app.get("/api/diagnostics")
+def system_diagnostics():
+    return supervisor.diagnostics(force=True)
+
+
+@app.get("/api/analytics/pipeline")
+def pipeline_analytics():
+    return supervisor.pipeline_analytics()
+
+
+@app.get("/api/feedback")
+def get_feedback(category: str = "", status: str = ""):
+    return supervisor.list_feedback(category=category, status=status)
+
+
+@app.post("/api/feedback")
+async def post_feedback(request: Request):
+    b = await request.json()
+    default_role = "hr" if _role(request) == "hr" else "interviewer"
+    return supervisor.submit_feedback(
+        reviewer=b.get("reviewer", "Supervisor"),
+        role=b.get("role", default_role),
+        category=b.get("category", "general"),
+        comment=b.get("comment", ""),
+        rating=b.get("rating"),
+        target=b.get("target", ""),
+    )
+
+
+@app.post("/api/feedback/{feedback_id}/resolve")
+async def resolve_feedback(feedback_id: int, request: Request):
+    _need_role(request, "hr")
+    b = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+    return supervisor.resolve_feedback(
+        feedback_id,
+        resolution_note=b.get("resolution_note", ""),
+        status=b.get("status", "resolved"),
+    )
+
+
 @app.get("/api/export/candidates.csv")
 def export_candidates_csv(status: str = "all"):
     rows = list_candidates(status=status)
@@ -709,13 +859,7 @@ def export_candidates_csv(status: str = "all"):
     writer = csv.writer(buf)
     writer.writerow(cols)
     for r in rows:
-        safe_row = []
-        for c in cols:
-            val = "" if r.get(c) is None else str(r.get(c))
-            if val and val[0] in ("=", "+", "-", "@", "\t", "\r"):
-                val = "'" + val
-            safe_row.append(val)
-        writer.writerow(safe_row)
+        writer.writerow([_csv_cell(r.get(c)) for c in cols])
     return Response(
         content=buf.getvalue(),
         media_type="text/csv; charset=utf-8",
@@ -723,17 +867,47 @@ def export_candidates_csv(status: str = "all"):
     )
 
 
+@app.get("/api/export/feedback.csv")
+def export_feedback_csv():
+    data = supervisor.list_feedback()
+    cols = ["id", "reviewer", "role", "category", "rating", "target", "status", "comment", "resolution_note", "created_at", "resolved_at"]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(cols)
+    for r in data["rows"]:
+        writer.writerow([_csv_cell(r.get(c)) for c in cols])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="hr_supervisor_feedback.csv"'},
+    )
+
+
+@app.get("/api/export/supervisor-report.md")
+@app.get("/api/export/feedback.md")
+def export_supervisor_report():
+    return Response(
+        content=supervisor.supervisor_report_markdown(),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="hr_supervisor_report.md"'},
+    )
+
+
 @app.get("/api/export/database.json")
 def export_database_json():
     with db.Session() as s:
         cands = [summary(c) for c in s.scalars(select(db.Candidate).order_by(db.Candidate.id))]
-        vacs = [_vacancy_json(v) for v in db.vacancies_in({"open", "filled", "closed"})]
+        vacs = db.vacancies_in({"open", "filled", "closed"})
+        cand_map = db.get_candidates_by_app_nos([s_["app_no"] for v in vacs for s_ in (v.suggestions or [])])
+        vac_rows = [_vacancy_json(v, cand_map=cand_map) for v in vacs]
         areas = [{"name": a.name, "active": a.active, "required_skills": a.required_skills}
                  for a in s.scalars(select(db.Area).order_by(db.Area.id))]
         drafts = [{"id": d.id, "kind": d.kind, "status": d.status, "delivery_status": d.delivery_status,
                    "sent_to": d.sent_to, "released_at": d.released_at}
                   for d in s.scalars(select(db.Draft).order_by(db.Draft.id))]
-    return {"exported_at": db.now(), "candidates": cands, "vacancies": vacs, "areas": areas, "drafts": drafts}
+    fb = supervisor.list_feedback()
+    return {"exported_at": db.now(), "candidates": cands, "vacancies": vac_rows, "areas": areas,
+            "drafts": drafts, "feedback": fb["rows"]}
 
 
 @app.post("/api/areas")

@@ -42,9 +42,14 @@ def require_bearer_token(authorization: str | None = Header(default=None)) -> No
         raise HTTPException(status_code=401, detail="Invalid bearer token.")
 
 
+@app.get("/health")
+def mock_health():
+    return talent_hub.mongo_health()
+
+
 @app.get("/api/interns", dependencies=[Depends(require_bearer_token)])
-def get_all_interns():
-    return talent_hub.mongo_list_interns(limit=0)
+def get_all_interns(specialization: str = "", q: str = "", limit: int = 0):
+    return talent_hub.mongo_list_interns(specialization=specialization, q=q, limit=limit)
 
 
 @app.get("/api/interns/{identifier}", dependencies=[Depends(require_bearer_token)])

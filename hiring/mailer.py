@@ -233,6 +233,16 @@ def send_email(
     if not force and not cfg["enabled"]:
         return {"ok": True, "status": "outbox_only", "sent_to": "", "message_id": "", "error": ""}
 
+    is_probe = (meta or {}).get("app_no") == "SMTP-TEST"
+    if config.DEMO_EMAIL_LOCK and not is_probe and not (cfg.get("test_recipient") or "").strip():
+        return {
+            "ok": False,
+            "status": "failed",
+            "sent_to": to_email.strip(),
+            "message_id": "",
+            "error": "Demo email lock is active (HR_DEMO_EMAIL_LOCK=1): set Demo Recipient Override first.",
+        }
+
     msg, actual_to, msg_id = build_message(to_email, to_name, subject, body, cfg, meta=meta)
     try:
         delivered_id = _deliver_smtp(msg, cfg)

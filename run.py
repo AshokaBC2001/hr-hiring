@@ -12,7 +12,7 @@ import json
 import sys
 import time
 
-from hiring import config, db, flows, llm, actions, talent_hub
+from hiring import actions, config, db, flows, llm, supervisor, talent_hub
 from hiring.checks import parse_json_object
 
 
@@ -43,8 +43,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="HR Hiring helpers")
     ap.add_argument(
         "command",
-        choices=["check", "samples", "once", "plan", "brief", "status", "seed-talent-hub", "interns"],
+        choices=[
+            "check", "samples", "once", "plan", "brief", "status",
+            "seed-talent-hub", "interns", "doctor", "report", "feedback",
+        ],
     )
+    ap.add_argument("--reviewer", default="Supervisor", help="Feedback author (for feedback --comment)")
+    ap.add_argument("--category", default="general", help="Feedback category")
+    ap.add_argument("--rating", type=int, default=None, help="Optional rating 1-5")
+    ap.add_argument("--target", default="", help="Optional target reference (e.g. APP-0001)")
+    ap.add_argument("--comment", default="", help="Submit supervisor feedback text")
+    ap.add_argument("--out", default="", help="Optional output file path for report")
     a = ap.parse_args()
     if a.command == "check":
         return check()
@@ -92,6 +101,34 @@ def main() -> int:
         for c in db.candidates_in(set(config.STATUSES)):
             print(f"{c.app_no}  {c.name or '-':28} {config.STATUSES[c.status][0]:32} {c.area or '-':10} "
                   f"{c.score if c.score is not None else '-'}")
+    elif a.command == "doctor":
+        diag = supervisor.diagnostics(force=True)
+        print(json.dumps(diag, indent=2))
+        return 0 if diag["ready"] else 1
+    elif a.command == "report":
+        md = supervisor.supervisor_report_markdown()
+        if a.out:
+            from pathlib import Path
+            Path(a.out).write_text(md, encoding="utf-8")
+            print(f"Wrote supervisor report to {a.out}")
+        else:
+            print(md)
+    elif a.command == "feedback":
+        if a.comment:
+            try:
+                saved = supervisor.submit_feedback(
+                    reviewer=a.reviewer,
+                    category=a.category,
+                    rating=a.rating,
+                    target=a.target,
+                    comment=a.comment,
+                )
+            except actions.ActionError as exc:
+                print(f"Error: {exc}")
+                return 1
+            print(json.dumps(saved, indent=2))
+        else:
+            print(json.dumps(supervisor.list_feedback(), indent=2))
     return 0
 
 

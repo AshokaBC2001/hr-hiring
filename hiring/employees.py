@@ -28,13 +28,27 @@ EMPLOYEES = {
 }
 
 
+_MD_CACHE: dict[Path, tuple[int, str]] = {}
+
+
 def folder(key: str) -> Path:
     return config.EMPLOYEES_DIR / key
 
 
 def read(key: str, rel: str) -> str:
     p = folder(key) / rel
-    return p.read_text(encoding="utf-8") if p.exists() else ""
+    if not p.exists():
+        return ""
+    try:
+        mtime = p.stat().st_mtime_ns
+    except OSError:
+        return ""
+    cached = _MD_CACHE.get(p)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    text = p.read_text(encoding="utf-8")
+    _MD_CACHE[p] = (mtime, text)
+    return text
 
 
 def section(text: str, heading: str) -> str:
@@ -114,6 +128,10 @@ LESSON_RULES = [
     ("exactly as given", "Copy the area, date and IDs exactly as written in the facts."),
     ("too long", "Keep the text short."),
     ("too short", "Write at least three full sentences."),
+    ("give 1 to 3", "Always include 1 to 3 short reasons."),
+    ("must include", "Include every required detail from FACTS word for word."),
+    ("subject is missing", "Always write a clear non-empty subject line."),
+    ("area name is empty", "Always pick an exact area name, New area: <name>, or Needs human review."),
 ]
 
 
@@ -151,20 +169,31 @@ class StepResult:
     problems: list[str] = field(default_factory=list)
 
 
+def _prompt_role(key: str) -> str:
+    text = role_text(key)
+    return re.sub(r"^(?:In short|Hands work to):.*$\n?", "", text, flags=re.M).strip()
+
+
 def ask_checked(key: str, routine: str, task_text: str,
                 check: Callable[[dict], tuple[Any, list[str]]],
                 fallback: Callable[[], Any], max_tokens: int | None = None) -> StepResult:
     """Ask the model, check the answer in plain code, send problems back for a fix,
-    and use the fallback after the allowed fixes. llm.ModelUnavailable is not caught."""
+    and use the fallback after the allowed fixes. llm.ModelUnavailable propagates unless
+    HR_ALLOW_RULES_ONLY is enabled."""
     learned = lessons(key)
-    system = role_text(key) + f"\n\nROUTINE: {routine}\n\n" + instructions(key, routine)
+    system = _prompt_role(key) + f"\n\nROUTINE: {routine}\n\n" + instructions(key, routine)
     if learned:
         system += "\n\nLessons from earlier runs:\n" + "\n".join(f"- {x}" for x in learned)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": task_text}]
     calls = 0
     problems: list[str] = []
     for attempt in range(1 + config.MAX_FIXES):
-        text = llm.chat(messages, json_mode=True, max_tokens=max_tokens)
+        try:
+            text = llm.chat(messages, json_mode=True, max_tokens=max_tokens)
+        except llm.ModelUnavailable:
+            if config.ALLOW_RULES_ONLY:
+                return StepResult(fallback(), "fallback", calls, ["Model offline (rules-only mode)"])
+            raise
         calls += 1
         try:
             data = parse_json_object(text)

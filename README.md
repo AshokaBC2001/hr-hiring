@@ -115,12 +115,20 @@ HR officer adds a CV
 | Score weights and thresholds | `hiring/config.py` |
 | Agent instructions | `employees/<agent>/ROLE.md` and `routines/<routine>/SKILL.md` |
 | Agent schedule | `employees/<agent>/SCHEDULE.md` |
-| Model | The model name in `start_model.sh` (any GGUF model on Hugging Face, for example a Qwen3 4B Instruct build) |
-| App port | `APP_PORT` in `hiring/config.py` |
-| TalentHub API & sample MongoDB | `TALENT_HUB_*` env vars / `hiring/config.py` |
-| Live SMTP email delivery | `SMTP_*` env vars / `hiring/config.py` or **Email Settings** in the UI |
+| Model | `start_model.sh`, or set `HR_MODEL_URL`, `HR_MODEL_NAME`, and optional `HR_MODEL_API_KEY` (or `HR_ALLOW_RULES_ONLY=1`) |
+| App bind & hosting | `HR_APP_HOST`, `HR_APP_PORT`/`PORT`, `HR_PUBLIC_HOSTING`, `HR_ALLOWED_HOSTS`, `HR_AUTH_USER`/`HR_AUTH_PASS`, `.env` |
+| TalentHub API & MongoDB | `TALENT_HUB_MODE` (`auto` / `api` / `mongo`), `TALENT_HUB_*` env vars / `hiring/config.py` |
+| Live SMTP email delivery | `HR_SMTP_*` / `HR_DEMO_EMAIL_LOCK` env vars or **Email Settings** in the UI |
 
 To reset all data, stop the app and delete the `data` folder.
+
+## Hosting & Supervisor Evaluation
+
+For hosted deployments (Cloudflare Tunnel / ngrok, Docker Compose, Render, Railway, or MongoDB Atlas) and supervisor feedback workflows, see **[docs/HOSTING_AND_SUPERVISOR_GUIDE.md](docs/HOSTING_AND_SUPERVISOR_GUIDE.md)** and `.env.example`:
+
+- Run `.venv/bin/python run.py doctor` before hosting to check SQLite WAL integrity, MongoDB/TalentHub connectivity, LLM reachability, and security warnings.
+- Protect a hosted URL without altering the UI by setting `HR_AUTH_USER`, `HR_AUTH_PASS`, `HR_PUBLIC_HOSTING=1`, and `HR_DEMO_EMAIL_LOCK=1` (with Demo Recipient Override).
+- Collect and export supervisor evaluation notes via `POST /api/feedback`, `GET /api/export/supervisor-report.md`, or `.venv/bin/python run.py report`.
 
 ## TalentHub Sample MongoDB & Read-Only API
 
@@ -144,30 +152,29 @@ Until access to the live **SLT TalentHub** API is configured, this branch provid
 .venv/bin/python run.py interns
 ```
 
-To switch to the real TalentHub service later, set `TALENT_HUB_API_URL` (e.g. `https://talenthub.slt.lk/api`) and `TALENT_HUB_API_TOKEN` in the environment. Optional sample MongoDB overrides: `TALENT_HUB_MONGO_URI`, `TALENT_HUB_DB_NAME`, `TALENT_HUB_COLLECTION`.
+To switch to the real TalentHub service later, set `TALENT_HUB_API_URL` (e.g. `https://talenthub.slt.lk/api`) and `TALENT_HUB_API_TOKEN` in the environment. To connect directly to local MongoDB or MongoDB Atlas without running the mock API server, set `TALENT_HUB_MODE=mongo` (or leave `TALENT_HUB_API_URL=` empty) alongside `TALENT_HUB_MONGO_URI`. Optional overrides: `TALENT_HUB_DB_NAME`, `TALENT_HUB_COLLECTION`.
 
 ## Project structure
 
 ```
 setup.sh, start_model.sh, start_app.sh, start_talent_hub.sh   setup and start scripts
-app.py                                   web app entry point
-run.py                                   CLI helpers: check, samples, once, plan, brief, status, seed-talent-hub, interns
+Dockerfile, .dockerignore, .env.example  container & hosting configuration
+app.py                                   web app entry point (supports HR_APP_HOST, PORT)
+run.py                                   CLI helpers: check, samples, once, plan, brief, status, seed-talent-hub, interns, doctor, feedback, report
 employees/                               the 5 AI agents (Markdown)
 shared/areas.json                        starter areas
 hiring/
-  config.py     settings               db.py              database (SQLite)
-  llm.py        llama-server client    checks.py          checks on model answers
-  mailer.py     live SMTP sender       vacancies.py       MongoDB-backed vacancy planning
-  talent_hub.py TalentHub API & Mongo  talent_hub_mock.py local TalentHub mock API
-  tools.py      CV reading, scoring, scheduling, templates
-  employees.py  loads agent folders, checked model calls
-  flows.py      LangGraph workflows    scheduler.py  APScheduler jobs
-  actions.py    user actions           server.py     FastAPI routes
+  config.py     settings & .env          db.py              database (SQLite WAL + migrations)
+  llm.py        pooled LLM client        checks.py          checks on model answers
+  mailer.py     live SMTP sender         vacancies.py       MongoDB-backed vacancy planning
+  supervisor.py diagnostics & feedback   talent_hub.py      TalentHub API & direct MongoDB
+  talent_hub_mock.py local mock API      tools.py           CV reading, scoring, templates
+  employees.py  cached Markdown runner   flows.py           LangGraph + coalesced background runner
+  scheduler.py  APScheduler jobs         actions.py         user actions
+  server.py     FastAPI routes, hosting guards & exports
 scripts/                                 dataset importers & TalentHub seeder
+docs/                                    architecture, specs, plans & hosting/supervisor guide
 web/                                     front end (HTML, CSS, JavaScript)
-samples/                                 sample CVs (fictional people)
-tests/                                   tests, fake model, and TalentHub test doubles
-data/                                    created at runtime: database, inbox, outbox, logs, notes
 ```
 
 ## Testing
@@ -188,8 +195,8 @@ The tests use a scripted fake model (`tests/fake_model.py`), so no real model is
 - The checks confirm facts appear in the CV, not that a decision is correct. Borderline and low scores always go to a person.
 - Evidence matching is word-based, not semantic.
 - Scanned PDFs are not supported (no OCR). They are flagged for a person.
-- No authentication. The role switch is for demo use only.
-- One model call at a time.
+- The role switcher (`HR Officer` / `Interviewer`) controls role actions locally; when hosting externally, enable `HR_AUTH_USER` / `HR_AUTH_PASS` (HTTP Basic Auth) or `HR_ACCESS_TOKEN`.
+- One local LLM call runs at a time (`WORK_LOCK`).
 
 ## Troubleshooting
 

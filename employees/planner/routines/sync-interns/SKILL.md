@@ -4,9 +4,9 @@ Starts when: the Planner runs
 Done by: plain code (no model)
 
 ## What it does
-Queries the live intern records directly from MongoDB through the read-only Talent Hub REST API
-(`GET /api/interns`), keeping MongoDB as the single source of truth without creating a separate
-SQLite interns table.
+Queries live intern records from MongoDB (`slt_talent_hub_sample.interns`) either directly via
+`TALENT_HUB_MODE=mongo` or through the read-only TalentHub REST API (`GET /api/interns`),
+keeping MongoDB as the single source of truth without creating a separate SQLite interns table.
 
 For each record it reads the Talent Hub fields:
 - `Trainee_ID`, `Trainee_Name`, `Training_StartDate`, `Training_EndDate`, `field_of_spec_name`, plus optional `Trainee_Email` and `Institute`

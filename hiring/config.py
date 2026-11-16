@@ -8,6 +8,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+
+def _load_dotenv(path: Path) -> None:
+    """Load simple KEY=VALUE lines from .env without overriding real environment variables."""
+    if not path.is_file():
+        return
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            key = k.strip()
+            val = v.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, val)
+    except OSError:
+        pass
+
+
+_load_dotenv(ROOT / ".env")
+
 # Where the system keeps its data (register database, CV files, released replies, logs).
 DATA_DIR = Path(os.environ.get("HR_DATA_DIR", str(ROOT / "data")))
 
@@ -16,18 +37,35 @@ AREAS_FILE = ROOT / "shared" / "areas.json"  # starter areas (copied into the re
 WEB_DIR = ROOT / "web"
 SAMPLES_DIR = ROOT / "samples"
 
-# ---- The model (llama.cpp llama-server, OpenAI-style API) -------------------
+# ---- The model (llama.cpp llama-server or OpenAI-compatible HTTP endpoint) ---
 MODEL_URL = os.environ.get("HR_MODEL_URL", "http://127.0.0.1:8080").rstrip("/")
 MODEL_NAME = os.environ.get("HR_MODEL_NAME", "gemma-3-4b-it")
+MODEL_API_KEY = os.environ.get("HR_MODEL_API_KEY", "").strip()
 MODEL_TIMEOUT = float(os.environ.get("HR_MODEL_TIMEOUT", "300"))   # seconds per call
 MODEL_TEMPERATURE = 0.2
 MODEL_MAX_TOKENS = 900
 # Gemma models have no separate "system" role, so instructions go into the user message.
-MERGE_SYSTEM_INTO_USER = True
+MERGE_SYSTEM_INTO_USER = os.environ.get("HR_MERGE_SYSTEM", "1").strip().lower() not in ("0", "false", "no")
+# Optional hosted fallback: when 1, agents fall back directly to deterministic rules if no LLM server is up.
+ALLOW_RULES_ONLY = os.environ.get("HR_ALLOW_RULES_ONLY", "0").strip().lower() in ("1", "true", "yes")
 
-# ---- The web app ---------------------------------------------------------------
-APP_HOST = "127.0.0.1"   # only this computer can open the pages
-APP_PORT = int(os.environ.get("HR_APP_PORT", "8000"))
+# ---- The web app & hosting safeguards ------------------------------------------
+APP_HOST = os.environ.get("HR_APP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+APP_PORT = int(os.environ.get("HR_APP_PORT") or os.environ.get("PORT") or "8000")
+PUBLIC_HOSTING = os.environ.get("HR_PUBLIC_HOSTING", "0").strip().lower() in ("1", "true", "yes")
+ALLOWED_HOSTS = (
+    ["*"]
+    if PUBLIC_HOSTING
+    else [h.strip() for h in os.environ.get("HR_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if h.strip()]
+)
+ALLOWED_ORIGINS = [
+    o.strip().lower() for o in os.environ.get("HR_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+AUTH_USER = os.environ.get("HR_AUTH_USER", "").strip()
+AUTH_PASS = os.environ.get("HR_AUTH_PASS", "")
+ACCESS_TOKEN = os.environ.get("HR_ACCESS_TOKEN", "").strip()
+# When 1, live SMTP only sends when Demo Recipient Override (`test_recipient`) is configured.
+DEMO_EMAIL_LOCK = os.environ.get("HR_DEMO_EMAIL_LOCK", "0").strip().lower() in ("1", "true", "yes")
 
 # ---- Scoring (our own placeholder values, out of 100) ------------------------
 WEIGHTS = {"skills": 40, "projects": 30, "education": 20, "experience": 10}
@@ -122,6 +160,8 @@ SMTP_TEST_RECIPIENT = os.environ.get("HR_SMTP_TEST_RECIPIENT", "").strip()
 SMTP_TIMEOUT = float(os.environ.get("HR_SMTP_TIMEOUT", "15"))
 
 # ---- SLT TalentHub (external intern DB + read-only REST API) --------------------
+# Mode: "auto" (API if TALENT_HUB_API_URL is set, otherwise direct MongoDB), "api", or "mongo"
+TALENT_HUB_MODE = os.environ.get("TALENT_HUB_MODE", "auto").strip().lower() or "auto"
 TALENT_HUB_MONGO_URI = os.environ.get("TALENT_HUB_MONGO_URI", "mongodb://127.0.0.1:27017")
 TALENT_HUB_DB_NAME = os.environ.get("TALENT_HUB_DB_NAME", "slt_talent_hub_sample")
 TALENT_HUB_COLLECTION = os.environ.get("TALENT_HUB_COLLECTION", "interns")

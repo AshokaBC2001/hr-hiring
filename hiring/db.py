@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (JSON, Boolean, Float, ForeignKey, Integer, String, Text,
-                        create_engine, func, select)
+                        create_engine, event, func, select)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from . import config
@@ -28,7 +28,7 @@ class Candidate(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     app_no: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200), default="")
-    email: Mapped[str] = mapped_column(String(200), default="")
+    email: Mapped[str] = mapped_column(String(200), index=True, default="")
     email_source: Mapped[str] = mapped_column(String(60), default="")
     cv_filename: Mapped[str] = mapped_column(String(255), default="")
     cv_stored: Mapped[str] = mapped_column(String(255), default="")
@@ -70,7 +70,7 @@ class Draft(Base):
     kind: Mapped[str] = mapped_column(String(30))
     subject: Mapped[str] = mapped_column(String(300), default="")
     body: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(20), default="waiting")  # waiting / released / discarded
+    status: Mapped[str] = mapped_column(String(20), index=True, default="waiting")  # waiting / released / discarded
     written_by: Mapped[str] = mapped_column(String(60), default="")
     check_notes: Mapped[list] = mapped_column(JSON, default=list)
     file: Mapped[str] = mapped_column(String(255), default="")
@@ -87,7 +87,7 @@ class Event(Base):
     __tablename__ = "events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     candidate_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
-    at: Mapped[str] = mapped_column(String(40))
+    at: Mapped[str] = mapped_column(String(40), index=True)
     actor: Mapped[str] = mapped_column(String(40))
     text: Mapped[str] = mapped_column(Text)
 
@@ -98,7 +98,7 @@ class Run(Base):
     employee: Mapped[str] = mapped_column(String(30), index=True)
     routine: Mapped[str] = mapped_column(String(60))
     candidate_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    started_at: Mapped[str] = mapped_column(String(40))
+    started_at: Mapped[str] = mapped_column(String(40), index=True)
     seconds: Mapped[float] = mapped_column(Float, default=0.0)
     outcome: Mapped[str] = mapped_column(String(20))   # ok / fixed / fallback / stopped / error
     model_calls: Mapped[int] = mapped_column(Integer, default=0)
@@ -151,6 +151,22 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text, default="")
 
 
+class SupervisorFeedback(Base):
+    """Structured supervisor and team feedback collected during hosted review/evaluation."""
+    __tablename__ = "feedback"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reviewer: Mapped[str] = mapped_column(String(120), default="Supervisor")
+    role: Mapped[str] = mapped_column(String(40), default="supervisor")
+    category: Mapped[str] = mapped_column(String(40), index=True, default="general")
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target: Mapped[str] = mapped_column(String(80), default="")
+    comment: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), index=True, default="open")  # open / resolved
+    resolution_note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[str] = mapped_column(String(40), default="")
+    resolved_at: Mapped[str] = mapped_column(String(40), default="")
+
+
 # ---------------------------------------------------------------------------------
 class Paths:
     data: Path = config.DATA_DIR
@@ -177,14 +193,26 @@ def now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
 
+def _configure_sqlite(dbapi_conn, _connection_record) -> None:
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.execute("PRAGMA foreign_keys=ON")
+    cur.execute("PRAGMA busy_timeout=5000")
+    cur.close()
+
+
 def setup(data_dir: Path | None = None) -> None:
     """Create the data folders and database, and copy the starter areas in once."""
     global _engine
+    if _engine is not None:
+        _engine.dispose()
     if data_dir is not None:
         paths.data = Path(data_dir)
     for d in (paths.data, paths.inbox, paths.outbox, paths.run_logs, paths.notes):
         d.mkdir(parents=True, exist_ok=True)
     _engine = create_engine(f"sqlite:///{paths.db}", connect_args={"check_same_thread": False, "timeout": 30})
+    event.listen(_engine, "connect", _configure_sqlite)
     Session.configure(bind=_engine)
     Base.metadata.create_all(_engine)
     _add_missing_columns()
@@ -229,6 +257,13 @@ def _add_missing_columns() -> None:
                         elif sample == []:
                             default_sql = " DEFAULT '[]'"
                 conn.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}{default_sql}")
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS ix_candidates_email ON candidates (email)",
+            "CREATE INDEX IF NOT EXISTS ix_drafts_status ON drafts (status)",
+            "CREATE INDEX IF NOT EXISTS ix_events_at ON events (at)",
+            "CREATE INDEX IF NOT EXISTS ix_runs_started_at ON runs (started_at)",
+        ):
+            conn.exec_driver_sql(idx_sql)
 
 
 # ---- small helpers ----------------------------------------------------------------
@@ -285,6 +320,16 @@ def get_candidate(app_no_or_id: str | int) -> Candidate | None:
         if isinstance(app_no_or_id, int):
             return s.get(Candidate, app_no_or_id)
         return s.scalar(select(Candidate).where(Candidate.app_no == app_no_or_id))
+
+
+def get_candidates_by_app_nos(app_nos: list[str] | set[str]) -> dict[str, Candidate]:
+    """Batch-fetch candidates keyed by app_no to avoid N+1 SQLite round-trips."""
+    clean = [str(a).strip() for a in app_nos if a]
+    if not clean:
+        return {}
+    with Session() as s:
+        rows = s.scalars(select(Candidate).where(Candidate.app_no.in_(clean)))
+        return {c.app_no: c for c in rows}
 
 
 def update_candidate(candidate_id: int, expect_status: str | set | None = None, **fields: Any) -> bool:

@@ -9,7 +9,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from . import checks, config, db, mailer, talent_hub, tools, vacancies
 
@@ -102,7 +102,14 @@ def set_email(app_no: str, email: str) -> None:
     email = (email or "").strip()
     if not checks.EMAIL_RE.fullmatch(email):
         raise ActionError(f'"{email}" is not a valid email address.')
-    flags = _resolve_flags(c, ("No email address", "The email typed by the HR officer"))
+    flags = _resolve_flags(c, ("No email address", "The email typed by the HR officer", "Possible duplicate"))
+    with db.Session() as s:
+        other = s.scalar(
+            select(db.Candidate).where(func.lower(db.Candidate.email) == email.lower(), db.Candidate.id != c.id)
+        )
+    if other is not None:
+        flags.append({"text": f"Possible duplicate: {other.app_no} has the same email.",
+                      "by": "HR officer", "at": db.now(), "open": True})
     db.update_candidate(c.id, email=email, email_source="Typed by HR officer", flags=flags)
     db.log_event(c.id, "HR officer", f"Set the email to {email}.")
 
@@ -115,7 +122,7 @@ def choose_area(app_no: str, area_name: str) -> dict:
         raise ActionError(f'"{area_name}" is not an active area.')
     if not area.required_skills:
         raise ActionError(f"{area.name} has no required skills yet. Add them on the Areas page first.")
-    profile = c.profile or tools.rule_profile(c.cv_text, tools.skill_vocabulary(db.active_areas()))
+    profile = _profile(c)
     score, parts, gaps = tools.score_cv(profile, c.cv_text, area)
     status = tools.shortlist_status(score)
     flags = _resolve_flags(c, ("AI suggested a new area", "The Recruiter could not choose", "The scoring rules suggest",
@@ -187,7 +194,7 @@ def _profile(c: db.Candidate) -> dict:
     return c.profile or tools.rule_profile(c.cv_text, tools.skill_vocabulary(db.active_areas()))
 
 
-def invite_from_pool(app_no: str, area_name: str) -> dict:
+def invite_from_pool(app_no: str, area_name: str, *, vacancy_id: int | None = None) -> dict:
     """Invite a pooled CV for an area so it enters the hiring flow as Shortlisted."""
     c = _candidate(app_no)
     _need(c, config.POOL_STATUSES, "Inviting to interview")
@@ -200,6 +207,8 @@ def invite_from_pool(app_no: str, area_name: str) -> dict:
         raise ActionError(f"{area.name} has no required skills yet. Add them on the Areas page first.")
     same = area.name == c.area
     fields = dict(status="shortlisted", area=area.name, profile=profile, score=score, score_parts=parts, gaps=gaps)
+    if vacancy_id is not None:
+        fields["vacancy_id"] = vacancy_id
     if not same:
         fields.update(
             area_source="Chosen by HR officer",
@@ -252,6 +261,7 @@ def rescore_pool() -> dict:
         if db.update_candidate(c.id, expect_status="no_area", status="new"):
             db.log_event(c.id, "HR officer", "The areas changed, so the CV was sent back to the Recruiter.")
             requeued += 1
+    vacancies.suggest_for_open()
     return {"rescored": rescored, "requeued": requeued}
 
 
@@ -265,10 +275,9 @@ def approve_suggestion(vacancy_id: int, app_no: str) -> dict:
         raise ActionError(f"This vacancy is {v.status}.")
     if not any(s["app_no"] == app_no and s["state"] == "suggested" for s in (v.suggestions or [])):
         raise ActionError(f"{app_no} is not waiting for your approval on this vacancy.")
-    out = invite_from_pool(app_no, v.area)
+    out = invite_from_pool(app_no, v.area, vacancy_id=v.id)
     c = _candidate(app_no)
-    db.update_candidate(c.id, vacancy_id=v.id)
-    rows = [dict(s) for s in v.suggestions]
+    rows = [dict(s) for s in (v.suggestions or [])]
     for s in rows:
         if s["app_no"] == app_no:
             s["state"], s["at"] = "approved", db.now()
@@ -306,7 +315,15 @@ def add_vacancy(area_name: str, places: int, reason: str, opens_on: str = "") ->
         raise ActionError("How many places? Type a number.") from None
     if not 1 <= places <= 50:
         raise ActionError("The number of places must be between 1 and 50.")
-    opens_on = (opens_on or "").strip()[:10] or date.today().isoformat()
+    raw_open = (opens_on or "").strip()[:10]
+    if raw_open:
+        try:
+            date.fromisoformat(raw_open)
+        except ValueError:
+            raise ActionError("Opens on must be a valid YYYY-MM-DD date.") from None
+        opens_on = raw_open
+    else:
+        opens_on = date.today().isoformat()
     with db.Session() as s:
         v = db.Vacancy(
             area=area.name,
@@ -437,11 +454,10 @@ RELEASE_MOVES = {
 }
 
 
-def _draft_facts(c: db.Candidate) -> tuple[dict, list[str], list[str]]:
+def _draft_facts(c: db.Candidate) -> dict:
     facts = {"name": c.name or "Candidate", "area": c.area or "the role", "app_no": c.app_no,
              "interview": c.interview_label or None, "work_id": str(c.work_id) if c.work_id else None}
-    facts = {k: v for k, v in facts.items() if v}
-    return facts, [], []
+    return {k: v for k, v in facts.items() if v}
 
 
 def edit_draft(draft_id: int, subject: str, body: str) -> list[str]:
@@ -450,7 +466,7 @@ def edit_draft(draft_id: int, subject: str, body: str) -> list[str]:
         if d is None or d.status != "waiting":
             raise ActionError("This email can no longer be edited.")
         c = s.get(db.Candidate, d.candidate_id)
-        facts, _, _ = _draft_facts(c)
+        facts = _draft_facts(c)
         must = {"invitation": [c.area, c.interview_label], "acceptance": [c.area, str(c.work_id or "")]}.get(d.kind, [])
         _, problems = checks.check_draft({"subject": subject, "body": body}, facts, [m for m in must if m])
         d.subject, d.body = subject.strip()[:200], body.strip()

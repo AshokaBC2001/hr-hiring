@@ -34,6 +34,9 @@ STATE_LABELS = {
 }
 
 
+AUTO_CLOSE_MARKER = " - closed: no one is finishing now."
+
+
 def _summary(c: db.Candidate, area: str) -> dict[str, Any]:
     v = (c.area_scores or {}).get(area) or {}
     return {
@@ -46,10 +49,15 @@ def _summary(c: db.Candidate, area: str) -> dict[str, Any]:
     }
 
 
-def pool_for_area(area: str, skip: set[str] | frozenset[str] = frozenset()) -> list[db.Candidate]:
+def pool_for_area(
+    area: str,
+    skip: set[str] | frozenset[str] = frozenset(),
+    pool_rows: list[db.Candidate] | None = None,
+) -> list[db.Candidate]:
     """CVs waiting in the pool that score enough for ``area``, ranked best first."""
+    candidates = db.candidates_in(config.POOL_STATUSES) if pool_rows is None else pool_rows
     rows = []
-    for c in db.candidates_in(config.POOL_STATUSES):
+    for c in candidates:
         if c.app_no in skip or c.vacancy_id:
             continue
         v = (c.area_scores or {}).get(area)
@@ -59,7 +67,7 @@ def pool_for_area(area: str, skip: set[str] | frozenset[str] = frozenset()) -> l
     return [c for _, _, c in rows]
 
 
-def refresh_suggestions(v: db.Vacancy) -> int:
+def refresh_suggestions(v: db.Vacancy, pool_rows: list[db.Candidate] | None = None) -> int:
     """Top the suggestion list up from the pool. Returns count added."""
     if v.status != "open":
         return 0
@@ -70,7 +78,7 @@ def refresh_suggestions(v: db.Vacancy) -> int:
         return 0
     used = {s["app_no"] for s in suggestions}
     added = []
-    for c in pool_for_area(v.area, skip=used):
+    for c in pool_for_area(v.area, skip=used, pool_rows=pool_rows):
         if len(live) + len(added) >= want:
             break
         added.append(_summary(c, v.area))
@@ -80,7 +88,7 @@ def refresh_suggestions(v: db.Vacancy) -> int:
 
 
 def find_and_update(today: date | None = None, intern_rows: list[dict[str, Any]] | None = None) -> dict[str, int]:
-    """Check MongoDB interns via TalentHub API and keep automatic vacancies up to date."""
+    """Check MongoDB interns via TalentHub API/Mongo and keep automatic vacancies up to date."""
     today = today or date.today()
     cutoff = (today + timedelta(days=config.VACANCY_NOTICE_DAYS)).isoformat()
     earliest = (today - timedelta(days=config.VACANCY_LOOKBACK_DAYS)).isoformat()
@@ -92,7 +100,9 @@ def find_and_update(today: date | None = None, intern_rows: list[dict[str, Any]]
         every = list(s.scalars(select(db.Vacancy)))
     done: set[str] = set()
     for v in every:
-        if v.status in ("filled", "closed"):
+        # Auto-closed vacancies (extended end dates) may re-open later once their new date enters notice;
+        # only filled or manually HR-closed vacancies permanently retire those trainee IDs.
+        if v.status == "filled" or (v.status == "closed" and AUTO_CLOSE_MARKER not in (v.reason or "")):
             done |= set(v.trainee_ids or [])
     open_auto = {v.area: v for v in every if v.status == "open" and v.created_by == "Planner"}
 
@@ -102,6 +112,7 @@ def find_and_update(today: date | None = None, intern_rows: list[dict[str, Any]]
             if row["Trainee_ID"] not in done:
                 leaving.setdefault(row["area"], []).append(row)
 
+    pool_rows = db.candidates_in(config.POOL_STATUSES)
     created = updated = closed = 0
     for area, interns in sorted(leaving.items()):
         ids = sorted(i["Trainee_ID"] for i in interns)
@@ -128,22 +139,27 @@ def find_and_update(today: date | None = None, intern_rows: list[dict[str, Any]]
                 v = row
             created += 1
         elif sorted(v.trainee_ids or []) != ids:
+            new_places = max(len(ids), v.filled)
+            new_status = "filled" if v.filled >= new_places else "open"
             db.update_vacancy(
                 v.id,
-                places=max(len(ids), v.filled),
+                places=new_places,
                 opens_on=opens_on,
                 reason=reason,
                 trainee_ids=ids,
+                status=new_status,
             )
             v = db.get_vacancy(v.id)
             updated += 1
-        refresh_suggestions(v)
+        if v and v.status == "open":
+            refresh_suggestions(v, pool_rows=pool_rows)
 
     for area, v in open_auto.items():
         if area not in leaving and not v.filled and not any(
             s["state"] in ("approved", "passed") for s in (v.suggestions or [])
         ):
-            db.update_vacancy(v.id, status="closed", reason=v.reason + " - closed: no one is finishing now.")
+            base_reason = (v.reason or "").replace(AUTO_CLOSE_MARKER, "")
+            db.update_vacancy(v.id, status="closed", reason=base_reason + AUTO_CLOSE_MARKER)
             closed += 1
 
     return {"created": created, "updated": updated, "closed": closed, "open": len(db.vacancies_in("open"))}
@@ -152,8 +168,9 @@ def find_and_update(today: date | None = None, intern_rows: list[dict[str, Any]]
 def suggest_for_open() -> dict[str, int]:
     """Ensure every open vacancy has enough pool suggestions."""
     added = waiting = 0
+    pool_rows = db.candidates_in(config.POOL_STATUSES)
     for v in db.vacancies_in("open"):
-        added += refresh_suggestions(v)
+        added += refresh_suggestions(v, pool_rows=pool_rows)
         fresh = db.get_vacancy(v.id)
         waiting += sum(1 for s in ((fresh.suggestions if fresh else []) or []) if s["state"] == "suggested")
     return {"suggestions_added": added, "waiting_for_approval": waiting}

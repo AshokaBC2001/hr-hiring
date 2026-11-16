@@ -49,7 +49,9 @@ def _cv_block(text: str) -> str:
     return "CV TEXT:\n<<<\n" + text[:config.MAX_CV_CHARS] + "\n>>>"
 
 
-def _json(label: str, obj: Any) -> str:
+def _json(label: str, obj: Any, compact: bool = False) -> str:
+    if compact:
+        return f"{label} (JSON):\n" + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
     return f"{label} (JSON):\n" + json.dumps(obj, ensure_ascii=False, indent=1)
 
 
@@ -172,8 +174,11 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
     areas = db.active_areas()
     names = [a.name for a in areas]
     cv_text = s["cv_text"]
-    area_list = [{"name": a.name, "description": a.description, "required_skills": a.required_skills} for a in areas]
-    task = (_json("AREAS", area_list) + "\n\n" + _json("PROFILE", s["profile"]) + "\n\n" + _cv_block(cv_text))
+    area_list = [
+        {"name": a.name, "description": (a.description or "")[:120], "required_skills": a.required_skills}
+        for a in areas
+    ]
+    task = (_json("AREAS", area_list, compact=True) + "\n\n" + _json("PROFILE", s["profile"]) + "\n\n" + _cv_block(cv_text))
     best_name, best_score, best_share = tools.best_area_by_rules(s["profile"], cv_text, areas)
 
     def fallback():
@@ -554,6 +559,16 @@ def k_read_run_logs(s: ChiefState) -> ChiefState:
         runs = list(ses.scalars(select(db.Run).where(db.Run.started_at >= since)))
         events = list(ses.scalars(select(db.Event).where(db.Event.at >= since)))
         waiting = ses.scalar(select(func.count(db.Draft.id)).where(db.Draft.status == "waiting")) or 0
+        failed_delivery = ses.scalar(
+            select(func.count(db.Draft.id)).where(db.Draft.status == "released", db.Draft.delivery_status == "failed")
+        ) or 0
+        open_feedback = ses.scalar(
+            select(func.count(db.SupervisorFeedback.id)).where(db.SupervisorFeedback.status == "open")
+        ) or 0
+    open_vacs = db.vacancies_in("open")
+    vacs_without_suggestions = sum(
+        1 for v in open_vacs if not any(sg.get("state") in ("suggested", "approved", "passed") for sg in (v.suggestions or []))
+    )
     facts = {
         "date": date.today().isoformat(),
         "needs_a_person_today": {
@@ -562,14 +577,17 @@ def k_read_run_logs(s: ChiefState) -> ChiefState:
             "not_shortlisted_to_confirm": _count({"not_shortlisted_check"}),
             "cvs_that_could_not_be_read": _count({"needs_person"}),
             "emails_waiting_for_release": waiting,
+            "failed_email_deliveries_to_retry": failed_delivery,
+            "open_feedback_items": open_feedback,
         },
         "total_items_needing_a_person": 0,
         "waiting_for_interview_results": _count({"awaiting_result", "on_hold"}),
         "new_cvs_not_read_yet": _count({"new"}),
         "cvs_waiting_in_pool": _count(config.POOL_STATUSES),
-        "open_vacancies": len(db.vacancies_in("open")),
+        "open_vacancies": len(open_vacs),
+        "open_vacancies_needing_cvs": vacs_without_suggestions,
         "candidates_suggested_for_a_vacancy": sum(
-            1 for v in db.vacancies_in("open") for sg in (v.suggestions or []) if sg["state"] == "suggested"
+            1 for v in open_vacs for sg in (v.suggestions or []) if sg["state"] == "suggested"
         ),
         "last_24_hours": {
             "cvs_read": sum(1 for r in runs if r.routine == "parse-cv"),
@@ -580,7 +598,13 @@ def k_read_run_logs(s: ChiefState) -> ChiefState:
             "errors": sum(1 for r in runs if r.outcome == "error"),
         },
     }
-    facts["total_items_needing_a_person"] = sum(facts["needs_a_person_today"].values())
+    facts["total_items_needing_a_person"] = (
+        facts["needs_a_person_today"]["areas_to_choose"]
+        + facts["needs_a_person_today"]["borderline_scores_to_decide"]
+        + facts["needs_a_person_today"]["not_shortlisted_to_confirm"]
+        + facts["needs_a_person_today"]["cvs_that_could_not_be_read"]
+        + facts["needs_a_person_today"]["emails_waiting_for_release"]
+    )
     _record("chief-of-staff", "read-run-logs", None, started)
     return {"facts": facts}
 
@@ -642,8 +666,15 @@ def _template_brief(f: dict) -> str:
                  f"{f['new_cvs_not_read_yet']} new CV(s) are not read yet. {f.get('cvs_waiting_in_pool', 0)} CV(s) "
                  f"are waiting in the pool.")
     if f.get("open_vacancies"):
-        parts.append(f"{f['open_vacancies']} vacancy(ies) are open and "
+        extra_vac = ""
+        if f.get("open_vacancies_needing_cvs"):
+            extra_vac = f" ({f['open_vacancies_needing_cvs']} still need matching pool CVs)"
+        parts.append(f"{f['open_vacancies']} vacancy(ies) are open{extra_vac} and "
                      f"{f['candidates_suggested_for_a_vacancy']} candidate(s) are suggested for them.")
+    if n.get("failed_email_deliveries_to_retry"):
+        parts.append(f"{n['failed_email_deliveries_to_retry']} released email(s) failed SMTP delivery and need retry.")
+    if n.get("open_feedback_items"):
+        parts.append(f"{n['open_feedback_items']} supervisor feedback item(s) are open for review.")
     if f.get("cvs_archived_after_6_months"):
         parts.append(f"{f['cvs_archived_after_6_months']} CV(s) were archived after 6 months in the pool.")
     parts.append(f"In the last 24 hours the AI employees read {last['cvs_read']} CV(s), drafted "
@@ -842,6 +873,45 @@ def run_chief(wait: bool = True) -> dict:
 def run_all_once(limit: int = 20) -> list[dict]:
     """Recruiter, then Coordinator, then Onboarding, each on everything waiting."""
     return [run_employee(k, limit=limit, wait=True) for k in ("recruiter", "coordinator", "onboarding")]
+
+
+_kick_lock = threading.Lock()
+_kick_running = False
+_kick_pending = False
+
+
+def kick_background() -> None:
+    """Coalesce UI mutation wakeups so agents run sequentially without thread stampedes."""
+    global _kick_running, _kick_pending
+    if not config.SCHEDULER_ENABLED:
+        return
+    with _kick_lock:
+        if _kick_running:
+            _kick_pending = True
+            return
+        _kick_running = True
+        _kick_pending = False
+
+    def _worker() -> None:
+        global _kick_running, _kick_pending
+        try:
+            while True:
+                try:
+                    run_all_once()
+                    with PLANNER_LOCK:
+                        vacancies.suggest_for_open()
+                except Exception:
+                    pass
+                with _kick_lock:
+                    if not _kick_pending:
+                        _kick_running = False
+                        return
+                    _kick_pending = False
+        finally:
+            with _kick_lock:
+                _kick_running = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def start_background(fn, *args) -> None:

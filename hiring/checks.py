@@ -108,7 +108,8 @@ def check_profile(data: Any, cv_text: str) -> tuple[dict, list[str], list[str]]:
         elif email.lower() not in cv.raw.lower():
             problems.append(f'The email "{email}" is not written in the CV.')
     phone = str(data.get("phone") or "").strip()
-    if phone and re.sub(r"\D", "", phone) not in cv.digits:
+    phone_digits = re.sub(r"\D", "", phone)
+    if phone and (len(phone_digits) < 7 or phone_digits not in cv.digits):
         problems.append(f'The phone number "{phone}" is not written in the CV.')
     clean = {"name": name, "email": email, "phone": phone}
     removed: list[str] = []
@@ -133,9 +134,16 @@ def check_profile(data: Any, cv_text: str) -> tuple[dict, list[str], list[str]]:
 ALIASES = {
     "ai": "AI/ML", "ml": "AI/ML", "ai ml": "AI/ML", "machine learning": "AI/ML",
     "artificial intelligence": "AI/ML", "data science": "AI/ML", "ai and ml": "AI/ML",
-    "dev ops": "DevOps", "devops": "DevOps", "ml ops": "MLOps", "mlops": "MLOps",
+    "dev ops": "DevOps", "devops": "DevOps", "cloud engineering": "DevOps",
+    "ml ops": "MLOps", "mlops": "MLOps",
     "flutter": "Flutter", "mobile": "Flutter", "mobile development": "Flutter",
-    "mobile app development": "Flutter", "network engineering": "Networking",
+    "mobile app development": "Flutter", "mobile engineering": "Flutter",
+    "network engineering": "Networking", "network admin": "Networking",
+    "software engineering": "Backend Development",
+    "frontend development": "Web Development", "full stack": "Web Development", "full stack development": "Web Development",
+    "qa": "Software Quality Assurance", "quality assurance": "Software Quality Assurance", "software testing": "Software Quality Assurance",
+    "information security": "Cybersecurity", "infosec": "Cybersecurity", "cyber security": "Cybersecurity",
+    "ui ux": "UI/UX Design", "ui/ux": "UI/UX Design", "ux design": "UI/UX Design",
 }
 
 

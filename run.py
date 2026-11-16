@@ -39,7 +39,7 @@ def check() -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="SLT AI Employee helpers")
+    ap = argparse.ArgumentParser(description="HR Hiring helpers")
     ap.add_argument("command", choices=["check", "samples", "once", "brief", "status"])
     a = ap.parse_args()
     if a.command == "check":

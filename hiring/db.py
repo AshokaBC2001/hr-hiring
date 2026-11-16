@@ -46,6 +46,8 @@ class Candidate(Base):
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_parts: Mapped[dict] = mapped_column(JSON, default=dict)
     gaps: Mapped[list] = mapped_column(JSON, default=list)
+    vacancy_id: Mapped[int | None] = mapped_column(Integer, default=None)   # invited to fill this vacancy
+    area_scores: Mapped[dict] = mapped_column(JSON, default=dict)   # pool: {area: {score, parts, gaps}}
     questions: Mapped[list] = mapped_column(JSON, default=list)
     questions_source: Mapped[str] = mapped_column(String(40), default="")
     interview_at: Mapped[str] = mapped_column(String(40), default="")
@@ -110,6 +112,36 @@ class Area(Base):
     added_by: Mapped[str] = mapped_column(String(40), default="")
 
 
+class Intern(Base):
+    """A copy of one Talent Hub record. We only ever read Talent Hub, never write to it."""
+    __tablename__ = "interns"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trainee_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), default="")
+    start_date: Mapped[str] = mapped_column(String(10), default="")
+    end_date: Mapped[str] = mapped_column(String(10), default="", index=True)
+    specialization: Mapped[str] = mapped_column(String(80), default="")   # as written in Talent Hub
+    area: Mapped[str] = mapped_column(String(80), default="")             # matched to one of our areas
+    synced_at: Mapped[str] = mapped_column(String(40), default="")
+
+
+class Vacancy(Base):
+    """A place (or places) to fill in one area, because interns are finishing."""
+    __tablename__ = "vacancies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    area: Mapped[str] = mapped_column(String(80), index=True)
+    places: Mapped[int] = mapped_column(Integer, default=1)
+    opens_on: Mapped[str] = mapped_column(String(10), default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    trainee_ids: Mapped[list] = mapped_column(JSON, default=list)
+    suggestions: Mapped[list] = mapped_column(JSON, default=list)   # [{app_no, name, score, state}]
+    filled: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)   # open, filled, closed
+    created_by: Mapped[str] = mapped_column(String(40), default="")
+    created_at: Mapped[str] = mapped_column(String(40), default="")
+    updated_at: Mapped[str] = mapped_column(String(40), default="")
+
+
 class Brief(Base):
     __tablename__ = "briefs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -162,6 +194,7 @@ def setup(data_dir: Path | None = None) -> None:
     _engine = create_engine(f"sqlite:///{paths.db}", connect_args={"check_same_thread": False, "timeout": 30})
     Session.configure(bind=_engine)
     Base.metadata.create_all(_engine)
+    _add_missing_columns()
     with Session() as s:
         if s.scalar(select(func.count(Area.id))) == 0:
             for a in json.loads(config.AREAS_FILE.read_text(encoding="utf-8")):
@@ -177,6 +210,16 @@ def setup(data_dir: Path | None = None) -> None:
         if s.get(Setting, "paused") is None:
             s.add(Setting(key="paused", value="0"))
         s.commit()
+
+
+def _add_missing_columns() -> None:
+    """Older registers were made before some columns existed. Add them, keeping all data."""
+    with _engine.begin() as conn:
+        have = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(candidates)")}
+        if "area_scores" not in have:
+            conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN area_scores JSON DEFAULT '{}'")
+        if "vacancy_id" not in have:
+            conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN vacancy_id INTEGER")
 
 
 # ---- small helpers ----------------------------------------------------------------
@@ -272,6 +315,37 @@ def candidates_in(statuses: set[str] | str, limit: int | None = None) -> list[Ca
         if limit:
             q = q.limit(limit)
         return list(s.scalars(q))
+
+
+def interns_ending_by(day: str) -> list[Intern]:
+    """Interns whose last day is on or before the given date (and who have an area)."""
+    with Session() as s:
+        return list(s.scalars(select(Intern).where(Intern.end_date != "", Intern.end_date <= day,
+                                                   Intern.area != "").order_by(Intern.end_date, Intern.id)))
+
+
+def vacancies_in(statuses: set[str] | str) -> list[Vacancy]:
+    statuses = {statuses} if isinstance(statuses, str) else statuses
+    with Session() as s:
+        return list(s.scalars(select(Vacancy).where(Vacancy.status.in_(statuses))
+                              .order_by(Vacancy.opens_on, Vacancy.id)))
+
+
+def get_vacancy(vacancy_id: int) -> Vacancy | None:
+    with Session() as s:
+        return s.get(Vacancy, vacancy_id)
+
+
+def update_vacancy(vacancy_id: int, **fields: Any) -> bool:
+    with Session() as s:
+        v = s.get(Vacancy, vacancy_id)
+        if v is None:
+            return False
+        for k, val in fields.items():
+            setattr(v, k, val)
+        v.updated_at = now()
+        s.commit()
+        return True
 
 
 def active_areas() -> list[Area]:

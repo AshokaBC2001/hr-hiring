@@ -7,7 +7,7 @@ that come from other websites. Two roles use it, chosen at the top of the page:
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
-from . import actions, config, db, flows, llm, scheduler
+from . import actions, config, db, flows, llm, scheduler, talenthub, tools, vacancies
 from .employees import EMPLOYEES, lessons, role_summary, routines, schedule
 
 VERSION = "1.0"
@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     scheduler.stop()
 
 
-app = FastAPI(title="SLT AI Employee", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="HR Hiring", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "testserver"])
 
 
@@ -65,6 +65,8 @@ def _kick() -> None:
     """After a person acts, let the employees pick up the work straight away."""
     if config.SCHEDULER_ENABLED and not flows.WORK_LOCK.locked():
         flows.start_background(flows.run_all_once)
+    if config.SCHEDULER_ENABLED:
+        flows.start_background(vacancies.suggest_for_open)
 
 
 # ---- serialising -------------------------------------------------------------------------
@@ -90,7 +92,7 @@ def _draft_json(d: db.Draft, c: db.Candidate | None = None) -> dict:
         before = actions.RELEASE_MOVES[d.kind][0]
         out.update(app_no=c.app_no, name=c.name, email=c.email, candidate_status=c.status,
                    can_release=(d.status == "waiting" and c.status == before and bool(c.email)),
-                   release_blocker="" if c.email else "Add the student's email first.")
+                   release_blocker="" if c.email else "Add the candidate's email first.")
     return out
 
 
@@ -106,6 +108,8 @@ def detail(c: db.Candidate) -> dict:
         "score_parts": c.score_parts or {}, "gaps": c.gaps or [], "questions": c.questions or [],
         "questions_source": c.questions_source, "result_comment": c.result_comment, "result_at": c.result_at,
         "checklist": c.checklist or [],
+        "area_scores": [{"area": a, "score": sc} for a, sc in tools.top_areas(c.area_scores or {})],
+        "active_areas": [a.name for a in db.active_areas()],
         "flags": [dict(f, index=i) for i, f in enumerate(c.flags or [])],
         "drafts": [_draft_json(d, c) for d in drafts],
         "events": [{"at": e.at, "actor": e.actor, "text": e.text} for e in events],
@@ -131,7 +135,7 @@ def state():
         counts = dict(s.execute(select(db.Candidate.status, func.count(db.Candidate.id))
                                 .group_by(db.Candidate.status)).all())
         waiting = s.scalar(select(func.count(db.Draft.id)).where(db.Draft.status == "waiting")) or 0
-        flagged = sum(1 for c in s.scalars(select(db.Candidate).where(db.Candidate.status != "closed",
+        flagged = sum(1 for c in s.scalars(select(db.Candidate).where(db.Candidate.status.not_in({"closed", "archived"}),
                                                                        db.Candidate.status.not_in(config.HR_STATUSES)))
                       if any(f.get("open") for f in (c.flags or [])))
         selected = s.scalar(select(func.count(db.Candidate.id)).where(db.Candidate.work_id.is_not(None))) or 0
@@ -142,18 +146,25 @@ def state():
                                  .where(db.Candidate.area != "").group_by(db.Candidate.area)).all())
         brief = s.scalar(select(db.Brief).order_by(db.Brief.id.desc()).limit(1))
         areas = [a.name for a in s.scalars(select(db.Area).where(db.Area.active.is_(True)).order_by(db.Area.id))]
+    open_vacancies = db.vacancies_in("open")
+    vacancy_waiting = sum(1 for v in open_vacancies
+                          for s_ in (v.suggestions or []) if s_["state"] == "suggested")
     hr_count = sum(counts.get(k, 0) for k in config.HR_STATUSES)
     return {
         "model": llm.health(), "notice": flows.NOTICE, "paused": db.get_setting("paused") == "1",
         "counts": counts, "total": sum(counts.values()),
         "tiles": {"new": counts.get("new", 0), "review": hr_count + flagged, "release": waiting,
-                  "interview": counts.get("awaiting_result", 0) + counts.get("on_hold", 0), "selected": selected},
+                  "interview": counts.get("awaiting_result", 0) + counts.get("on_hold", 0), "selected": selected,
+                  "vacancies": vacancy_waiting},
         "team": {k: dict(flows.TEAM[k], name=EMPLOYEES[k]) for k in EMPLOYEES},
         "recent": [{"at": e.at, "actor": e.actor, "text": e.text, "app_no": app_no or "", "name": name or ""}
                    for e, app_no, name in recent],
         "areas_chart": [{"area": a, "count": by_area.get(a, 0)} for a in areas] +
                        [{"area": a, "count": n} for a, n in by_area.items() if a not in areas],
         "brief": {"text": brief.text, "created_at": brief.created_at, "written_by": brief.written_by} if brief else None,
+        "vacancies": {"open": len(open_vacancies),
+                      "places": sum(max(0, v.places - v.filled) for v in open_vacancies),
+                      "waiting": vacancy_waiting},
     }
 
 
@@ -170,9 +181,11 @@ def list_candidates(status: str = "", q: str = ""):
         elif status == "release":
             query = query.where(db.Candidate.status.in_(config.RELEASE_STATUSES))
         elif status == "open":
-            query = query.where(db.Candidate.status != "closed")
+            query = query.where(db.Candidate.status.not_in({"closed"} | config.NOT_IN_HIRING))
         elif status:
             query = query.where(db.Candidate.status == status)
+        else:                                    # All: the hiring flow only (pool CVs are on the Pool page)
+            query = query.where(db.Candidate.status.not_in(config.NOT_IN_HIRING))
         rows = list(s.scalars(query))
     if q:
         ql = q.lower()
@@ -200,8 +213,10 @@ def review():
     with db.Session() as s:
         decisions = list(s.scalars(select(db.Candidate).where(db.Candidate.status.in_(config.HR_STATUSES))
                                    .order_by(db.Candidate.updated_at)))
-        open_rows = list(s.scalars(select(db.Candidate).where(db.Candidate.status != "closed")
+        open_rows = list(s.scalars(select(db.Candidate).where(db.Candidate.status.not_in({"closed", "archived"}))
                                    .order_by(db.Candidate.id)))
+        no_area = list(s.scalars(select(db.Candidate).where(db.Candidate.status == "no_area",
+                                                            db.Candidate.suggested_new_area != "")))
         waiting = s.scalar(select(func.count(db.Draft.id)).where(db.Draft.status == "waiting")) or 0
     notes = []
     for c in open_rows:
@@ -212,15 +227,165 @@ def review():
                 notes.append({"app_no": c.app_no, "name": c.name, "index": i, "text": f["text"], "by": f.get("by", ""),
                               "at": f.get("at", ""), **_status(c)})
     suggested: dict[str, list] = {}
-    for c in decisions:
+    for c in decisions + no_area:
         if c.suggested_new_area:
             suggested.setdefault(c.suggested_new_area, []).append(c.app_no)
-    reason = {"needs_person": "The CV could not be read.", "needs_area": "Choose the internship area.",
+    reason = {"needs_person": "The CV could not be read.", "needs_area": "Choose the area.",
               "borderline": "Score is between 50 and 59. Decide: shortlist or not.",
               "not_shortlisted_check": "Score is below 50. Confirm Not shortlisted, or shortlist instead."}
     return {"decisions": [dict(summary(c), reason=reason[c.status]) for c in decisions], "notes": notes,
             "replies_waiting": waiting,
             "suggested_areas": [{"name": k, "app_nos": v} for k, v in suggested.items()]}
+
+
+def _vacancy_json(v: db.Vacancy) -> dict:
+    rows = []
+    for s in (v.suggestions or []):
+        c = db.get_candidate(s["app_no"])
+        rows.append({**s, "state_label": vacancies.STATE_LABELS.get(s["state"], s["state"]),
+                     "status_label": _status(c)["status_label"] if c else "",
+                     "result": c.result if c else "", "work_id": c.work_id if c else None})
+    return {"id": v.id, "area": v.area, "places": v.places, "filled": v.filled, "opens_on": v.opens_on,
+            "reason": v.reason, "trainee_ids": v.trainee_ids or [], "status": v.status,
+            "created_by": v.created_by, "created_at": v.created_at, "suggestions": rows,
+            "waiting": sum(1 for s in rows if s["state"] == "suggested")}
+
+
+@app.get("/api/vacancies")
+def list_vacancies(show: str = "open"):
+    """The places to fill. "open" is what the HR officer works on; the rest are history."""
+    wanted = {"open"} if show == "open" else ({"filled", "closed"} if show == "done" else
+                                              {"open", "filled", "closed"})
+    rows = [_vacancy_json(v) for v in db.vacancies_in(wanted)]
+    counts = {k: len(db.vacancies_in(k)) for k in ("open", "filled", "closed")}
+    return {"rows": rows, "counts": counts, "show": show,
+            "areas": [a.name for a in db.active_areas()],
+            "reserves": config.VACANCY_RESERVES, "notice_days": config.VACANCY_NOTICE_DAYS}
+
+
+@app.get("/api/interns")
+def list_interns(show: str = "all", q: str = ""):
+    """The intern records copied from Talent Hub (read only)."""
+    soon = (date.today() + timedelta(days=config.VACANCY_NOTICE_DAYS)).isoformat()
+    today = date.today().isoformat()
+    with db.Session() as s:
+        every = list(s.scalars(select(db.Intern).order_by(db.Intern.end_date, db.Intern.id)))
+    def ending_soon(i):
+        return bool(i.end_date) and today <= i.end_date <= soon
+    def finished(i):
+        return bool(i.end_date) and i.end_date < today
+    stats = {"total": len(every), "ending_soon": sum(1 for i in every if ending_soon(i)),
+             "finished": sum(1 for i in every if finished(i)),
+             "unknown_area": sum(1 for i in every if not i.area)}
+    rows = every
+    if show == "soon":
+        rows = [i for i in every if ending_soon(i)]
+    elif show == "unknown":
+        rows = [i for i in every if not i.area]
+    elif show == "finished":
+        rows = [i for i in every if finished(i)]
+    if q:
+        ql = q.lower()
+        rows = [i for i in rows if ql in (i.name or "").lower() or ql in i.trainee_id.lower()]
+    return {"stats": stats, "show": show, "source": config.TALENTHUB_SOURCE,
+            "synced_at": db.get_setting("interns_synced_at"), "notice_days": config.VACANCY_NOTICE_DAYS,
+            "rows": [{"trainee_id": i.trainee_id, "name": i.name, "start_date": i.start_date,
+                      "end_date": i.end_date, "specialization": i.specialization, "area": i.area,
+                      "ending_soon": ending_soon(i), "finished": finished(i)} for i in rows]}
+
+
+@app.post("/api/interns/sync")
+def sync_interns(request: Request):
+    _need_role(request, "hr")
+    out = flows.run_planner()
+    if out.get("error"):
+        raise actions.ActionError(out["error"])
+    if out.get("skipped"):
+        raise actions.ActionError("The Planner is busy. Try again in a moment.")
+    return {**out.get("sync", {}), **out.get("found", {})}
+
+
+@app.post("/api/vacancies")
+async def add_vacancy(request: Request):
+    _need_role(request, "hr")
+    b = await request.json()
+    return {"id": actions.add_vacancy(b.get("area", ""), b.get("places", 1), b.get("reason", ""),
+                                      b.get("opens_on", ""))}
+
+
+@app.post("/api/vacancies/{vacancy_id}/approve")
+async def approve_suggestion(vacancy_id: int, request: Request):
+    _need_role(request, "hr")
+    out = actions.approve_suggestion(vacancy_id, (await request.json()).get("app_no", ""))
+    _kick()
+    return out
+
+
+@app.post("/api/vacancies/{vacancy_id}/decline")
+async def decline_suggestion(vacancy_id: int, request: Request):
+    _need_role(request, "hr")
+    actions.decline_suggestion(vacancy_id, (await request.json()).get("app_no", ""))
+    return {"ok": True}
+
+
+@app.post("/api/vacancies/{vacancy_id}/close")
+def close_vacancy(vacancy_id: int, request: Request):
+    _need_role(request, "hr")
+    actions.close_vacancy(vacancy_id)
+    return {"ok": True}
+
+
+@app.get("/api/pool")
+def pool(area: str = "", show: str = "all", q: str = ""):
+    """The CV pool: CVs waiting to be invited, ranked for one area or by their best score."""
+    pool_page = {"new", "needs_person"} | config.POOL_STATUSES
+    today = date.today().isoformat()
+    since = (datetime.now() - timedelta(hours=24)).replace(microsecond=0).isoformat()
+    with db.Session() as s:
+        everything = list(s.scalars(select(db.Candidate).where(db.Candidate.status.in_(pool_page | {"archived"}))))
+        added_today = s.scalar(select(func.count(db.Candidate.id)).where(db.Candidate.created_at >= today)) or 0
+    areas = [a.name for a in db.active_areas()]
+    stats = {"in_pool": sum(1 for c in everything if c.status in config.POOL_STATUSES),
+             "being_read": sum(1 for c in everything if c.status == "new"),
+             "no_area": sum(1 for c in everything if c.status == "no_area"),
+             "added_today": added_today,
+             "archived": sum(1 for c in everything if c.status == "archived")}
+    if show == "archived":
+        rows = [c for c in everything if c.status == "archived"]
+    elif show == "no_area":
+        rows = [c for c in everything if c.status == "no_area"]
+    elif show == "recent":
+        rows = [c for c in everything if c.status in pool_page and (c.created_at or "") >= since]
+    else:
+        rows = [c for c in everything if c.status in pool_page]
+    if q:
+        ql = q.lower()
+        rows = [c for c in rows if ql in (c.name or "").lower() or ql in c.app_no.lower()]
+    if area and area in areas:
+        def area_score(c):
+            v = (c.area_scores or {}).get(area)
+            return v["score"] if v else None
+        rows = [c for c in rows if c.status == "in_pool" and (area_score(c) or 0) >= config.POOL_MIN_SCORE]
+        rows.sort(key=lambda c: (-area_score(c), c.id))
+    elif show == "recent":
+        rows.sort(key=lambda c: (c.created_at or "", c.id), reverse=True)
+    else:
+        rows.sort(key=lambda c: (c.score is None, -(c.score or 0), c.id))
+    out = []
+    for i, c in enumerate(rows, 1):
+        scores = c.area_scores or {}
+        shown = area if area in scores else c.area
+        v = scores.get(shown) if shown else None
+        out.append(dict(summary(c),
+                        rank=i if (area or show != "recent") and v else None,
+                        best_area=c.area, best_score=c.score,
+                        area_score=v["score"] if v else None,
+                        gaps=(v or {}).get("gaps", []) if shown else [],
+                        other_areas=[{"area": n, "score": sc} for n, sc in
+                                     tools.top_areas(scores, skip=tuple(x for x in (c.area, area) if x),
+                                                     n=config.POOL_OTHER_AREAS)]))
+    return {"stats": stats, "areas": areas, "min_score": config.POOL_MIN_SCORE, "area": area if area in areas else "",
+            "show": show, "rows": out}
 
 
 @app.get("/api/drafts")
@@ -359,6 +524,29 @@ def retry(app_no: str, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/candidates/{app_no}/invite")
+async def invite(app_no: str, request: Request):
+    _need_role(request, "hr")
+    out = actions.invite_from_pool(app_no, (await request.json()).get("area", ""))
+    _kick()
+    return out
+
+
+@app.post("/api/candidates/{app_no}/archive")
+def archive(app_no: str, request: Request):
+    _need_role(request, "hr")
+    actions.archive(app_no)
+    return {"ok": True}
+
+
+@app.post("/api/candidates/{app_no}/restore")
+def restore(app_no: str, request: Request):
+    _need_role(request, "hr")
+    actions.restore(app_no)
+    _kick()
+    return {"ok": True}
+
+
 @app.post("/api/candidates/{app_no}/close")
 def close(app_no: str, request: Request):
     _need_role(request, "hr")
@@ -393,6 +581,8 @@ async def add_area(request: Request):
     b = await request.json()
     new_id = actions.save_area(None, b.get("name", ""), b.get("description", ""), b.get("required_skills", ""),
                                b.get("preferred_skills", ""), b.get("keywords", ""), b.get("checklist", ""), True)
+    actions.rescore_pool()
+    _kick()
     return {"id": new_id}
 
 
@@ -403,6 +593,8 @@ async def update_area(area_id: int, request: Request):
     actions.save_area(area_id, b.get("name", ""), b.get("description", ""), b.get("required_skills", ""),
                       b.get("preferred_skills", ""), b.get("keywords", ""), b.get("checklist", ""),
                       b.get("active", True))
+    actions.rescore_pool()
+    _kick()
     return {"ok": True}
 
 

@@ -7,15 +7,15 @@ Done by: the model drafts, plain code checks
 Drafts the rejection email after a Fail, or a "result pending" note after a Hold.
 
 ## Instructions for the model
-Write a short, kind email to the student about their interview result, as described in the facts
+Write a short, kind email to the candidate about their interview result, as described in the facts
 ("message_type" is "rejection" or "hold").
 - rejection: thank them for attending, say we cannot offer a place this time, wish them well.
   Do not say "congratulations".
 - hold: thank them for attending, say the result is on hold and we will contact them when a
   decision is made.
-- Greet the student by first name.
+- Greet the candidate by first name.
 - Do not repeat the interviewer's comments.
-- End with: "Kind regards," and "SLT Internship Team".
+- End with: "Kind regards," and "Hiring Team".
 - Use only the facts. Do not add dates, numbers, links or names.
 
 ## Output

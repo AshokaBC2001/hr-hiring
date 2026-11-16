@@ -1,10 +1,10 @@
 #!/bin/bash
 # Starts the local model with llama.cpp (no Ollama). Leave this terminal open.
 # The first run downloads Gemma 3 4B (about 2.5 GB) from Hugging Face.
-# To try another model:  SLT_MODEL="<huggingface repo>:<quant>" ./start_model.sh
+# To try another model:  HR_MODEL="<huggingface repo>:<quant>" ./start_model.sh
 cd "$(dirname "$0")"
-MODEL="${SLT_MODEL:-ggml-org/gemma-3-4b-it-GGUF:Q4_K_M}"
-PORT="${SLT_MODEL_PORT:-8080}"
+MODEL="${HR_MODEL:-ggml-org/gemma-3-4b-it-GGUF:Q4_K_M}"
+PORT="${HR_MODEL_PORT:-8080}"
 if ! command -v llama-server >/dev/null 2>&1; then
   echo "llama-server was not found. Install llama.cpp first:"
   echo "  brew install llama.cpp"

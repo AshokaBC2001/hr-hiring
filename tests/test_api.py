@@ -33,14 +33,20 @@ def test_pages_and_state(client):
 
 
 def test_upload_and_flow(client):
-    p = config.SAMPLES_DIR / "kavindu_perera.txt"
+    p = config.SAMPLES_DIR / "arjun_mehta.txt"
     r = client.post("/api/cvs", headers=HR, files=[("files", (p.name, p.read_bytes(), "text/plain"))],
                     data={"email": "k@example.com"}).json()
     assert r["results"][0]["ok"]
     app_no = r["results"][0]["app_no"]
     flows.run_all_once()
     d = client.get(f"/api/candidates/{app_no}").json()
-    assert d["status"] == "invite_ready" and d["email"] == "k@example.com"
+    assert d["status"] == "in_pool" and d["email"] == "k@example.com"
+    assert len(d["area_scores"]) == len(d["active_areas"])
+    r = client.post(f"/api/candidates/{app_no}/invite", headers=HR, json={"area": d["area"]})
+    assert r.status_code == 200 and r.json()["status"] == "shortlisted"
+    flows.run_all_once()
+    d = client.get(f"/api/candidates/{app_no}").json()
+    assert d["status"] == "invite_ready"
     draft = d["drafts"][0]
     assert draft["can_release"]
     assert client.post(f"/api/drafts/{draft['id']}/release", headers=HR).json()["status"] == "awaiting_result"
@@ -51,6 +57,10 @@ def test_upload_and_flow(client):
 def test_roles_are_enforced(client):
     client.post("/api/samples", headers=HR)
     flows.run_all_once()
+    top = client.get("/api/pool?area=AI/ML").json()["rows"][0]["app_no"]
+    assert client.post(f"/api/candidates/{top}/invite", headers=IN, json={"area": "AI/ML"}).status_code == 400
+    client.post(f"/api/candidates/{top}/invite", headers=HR, json={"area": "AI/ML"})
+    flows.run_all_once()
     rows = client.get("/api/candidates?status=release").json()
     app_no = rows[0]["app_no"]
     d = client.get(f"/api/candidates/{app_no}").json()["drafts"][0]
@@ -59,6 +69,49 @@ def test_roles_are_enforced(client):
     client.post(f"/api/drafts/{d['id']}/release", headers=HR)
     r = client.post(f"/api/candidates/{app_no}/result", headers=HR, json={"result": "Pass"})
     assert r.status_code == 400 and "Interviewer" in r.json()["detail"]
+
+
+def test_pool_ranking_and_lists(client):
+    client.post("/api/samples", headers=HR)
+    flows.run_employee("recruiter", limit=30, wait=True)
+    p = client.get("/api/pool").json()
+    assert p["stats"]["being_read"] == 0 and p["stats"]["no_area"] == 3
+    assert p["stats"]["in_pool"] == len([r for r in p["rows"] if r["status"] in ("in_pool", "no_area")])
+    assert all(len(r["other_areas"]) <= 3 for r in p["rows"])
+    dev = client.get("/api/pool?area=DevOps").json()["rows"]
+    scores = [r["area_score"] for r in dev]
+    assert scores == sorted(scores, reverse=True) and min(scores) >= 50          # ranked, 50 or more only
+    assert [r["rank"] for r in dev] == list(range(1, len(dev) + 1))
+    assert "Ravi Kumar" not in [r["name"] for r in client.get("/api/pool?area=Web Development").json()["rows"]]
+    assert client.get("/api/candidates").json() == []                          # not in the hiring flow yet
+    app_no = dev[0]["app_no"]
+    assert client.post(f"/api/candidates/{app_no}/archive", headers=HR).status_code == 200
+    assert app_no in [r["app_no"] for r in client.get("/api/pool?show=archived").json()["rows"]]
+    assert app_no not in [r["app_no"] for r in client.get("/api/pool?area=DevOps").json()["rows"]]
+
+
+def test_interns_and_vacancies_pages(client):
+    client.post("/api/samples", headers=HR)
+    flows.run_employee("recruiter", limit=30, wait=True)
+    assert client.post("/api/interns/sync", headers=IN).status_code == 400     # HR officer only
+    out = client.post("/api/interns/sync", headers=HR).json()
+    assert out["read"] > 0 and out["created"] > 0
+    interns = client.get("/api/interns").json()
+    assert interns["stats"]["total"] == out["read"] and interns["source"] == "example"
+    soon = client.get("/api/interns?show=soon").json()["rows"]
+    assert soon and all(r["ending_soon"] for r in soon)
+    assert client.get("/api/interns?show=unknown").json()["rows"]               # kept, not guessed
+    v = client.get("/api/vacancies").json()
+    assert v["counts"]["open"] == out["created"]
+    one = v["rows"][0]
+    assert one["waiting"] == len([s for s in one["suggestions"] if s["state"] == "suggested"])
+    assert client.get("/api/state").json()["tiles"]["vacancies"] >= one["waiting"]
+    app_no = one["suggestions"][0]["app_no"]
+    assert client.post(f"/api/vacancies/{one['id']}/approve", headers=IN, json={"app_no": app_no}).status_code == 400
+    assert client.post(f"/api/vacancies/{one['id']}/approve", headers=HR, json={"app_no": app_no}).status_code == 200
+    assert client.post(f"/api/vacancies/{one['id']}/approve", headers=HR, json={"app_no": app_no}).status_code == 400
+    assert client.post("/api/vacancies", headers=HR, json={"area": "Sales", "places": 1, "reason": "left early"}).status_code == 200
+    assert client.post("/api/vacancies", headers=HR, json={"area": "Nope", "places": 1}).status_code == 400
 
 
 def test_other_websites_and_hosts_are_refused(client):
@@ -76,11 +129,15 @@ def test_bad_input_gives_a_clear_message(client):
 
 
 def test_review_lists_decisions_and_suggested_areas(client):
+    for a in client.get("/api/areas").json()["areas"]:   # keep only the IT areas, as the HR officer could
+        if a["name"] not in {"AI/ML", "DevOps", "MLOps", "Flutter"}:
+            assert client.put(f"/api/areas/{a['id']}", headers=HR, json={**a, "active": False}).status_code == 200
     client.post("/api/samples", headers=HR)
-    flows.run_employee("recruiter", limit=20, wait=True)
+    flows.run_employee("recruiter", limit=30, wait=True)
     r = client.get("/api/review").json()
-    statuses = {d["status"] for d in r["decisions"]}
-    assert {"needs_area", "borderline"} <= statuses
+    assert r["decisions"] == []                      # pool CVs do not need a decision
     assert any(s["name"] == "Human Resources" for s in r["suggested_areas"])
+    no_area = client.get("/api/pool?show=no_area").json()["rows"]
+    assert any(x["name"] == "Laura Bennett" for x in no_area)
     team = client.get("/api/team").json()
-    assert len(team["employees"]) == 4
+    assert len(team["employees"]) == 5

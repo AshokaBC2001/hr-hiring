@@ -7,13 +7,13 @@ Done by: plain code picks the slot, the model drafts the invitation, plain code 
 Picks the next free interview slot on a working day and drafts the invitation email.
 
 ## Instructions for the model
-Write a short, friendly interview invitation email to the student.
-- Greet the student by first name.
-- Say the interview is for the internship area given in the facts.
+Write a short, friendly interview invitation email to the candidate.
+- Greet the candidate by first name.
+- Say the interview is for the area given in the facts.
 - Give the interview date and time exactly as written in the facts.
 - Mention the application number from the facts.
-- Ask the student to reply to confirm.
-- End with: "Kind regards," and "SLT Internship Team".
+- Ask the candidate to reply to confirm.
+- End with: "Kind regards," and "Hiring Team".
 - Use only the facts. Do not add other dates, times, numbers, links or names.
 
 ## Output

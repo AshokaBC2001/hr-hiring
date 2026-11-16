@@ -6,11 +6,12 @@ status first, so an action can only happen at the right moment.
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 
 from sqlalchemy import select
 
-from . import checks, config, db, tools
+from . import checks, config, db, tools, vacancies
 
 
 class ActionError(Exception):
@@ -167,6 +168,7 @@ def close(app_no: str) -> None:
     _need(c, {"needs_person", "needs_area"}, "Closing")
     db.update_candidate(c.id, expect_status=c.status, status="closed", outcome="Closed by HR officer")
     db.log_event(c.id, "HR officer", "Closed the application without a reply.")
+    vacancies.on_result(c.id)
 
 
 def resolve_flag(app_no: str, index: int) -> None:
@@ -178,6 +180,150 @@ def resolve_flag(app_no: str, index: int) -> None:
     flags[index]["resolved_at"] = db.now()
     db.update_candidate(c.id, flags=flags)
     db.log_event(c.id, "HR officer", f"Marked as checked: {flags[index]['text'][:120]}")
+
+
+# ---- The CV pool (HR officer) --------------------------------------------------------------
+def _profile(c: db.Candidate) -> dict:
+    return c.profile or tools.rule_profile(c.cv_text, tools.skill_vocabulary(db.active_areas()))
+
+
+def invite_from_pool(app_no: str, area_name: str) -> dict:
+    """The HR officer picks a CV from the pool for one area. It moves into the hiring flow as
+    Shortlisted, and the Coordinator books the interview and drafts the invitation."""
+    c = _candidate(app_no)
+    _need(c, config.POOL_STATUSES, "Inviting to interview")
+    area = db.area_by_name(area_name)
+    if area is None or not area.active:
+        raise ActionError(f'"{area_name}" is not an active area.')
+    profile = _profile(c)
+    score, parts, gaps = tools.score_cv(profile, c.cv_text, area)
+    if score is None:
+        raise ActionError(f"{area.name} has no required skills yet. Add them on the Areas page first.")
+    same = area.name == c.area
+    fields = dict(status="shortlisted", area=area.name, profile=profile, score=score, score_parts=parts, gaps=gaps)
+    if not same:
+        fields.update(area_source="Chosen by HR officer", area_reasons=["Chosen by the HR officer from the pool."],
+                      area_evidence=[])
+    if not db.update_candidate(c.id, expect_status=c.status, **fields):
+        raise ActionError("The candidate changed while you were working. Reload the page.")
+    db.log_event(c.id, "HR officer", f"Invited to interview from the pool for {area.name} (score {score} of 100).")
+    return {"status": "shortlisted", "area": area.name, "score": score}
+
+
+def archive(app_no: str) -> None:
+    c = _candidate(app_no)
+    _need(c, config.POOL_STATUSES | {"needs_person"}, "Archiving")
+    if not db.update_candidate(c.id, expect_status=c.status, status="archived", outcome="Archived by HR officer"):
+        raise ActionError("The candidate changed while you were working. Reload the page.")
+    db.log_event(c.id, "HR officer", "Archived the CV (removed from the pool).")
+
+
+def restore(app_no: str) -> str:
+    """Puts an archived CV back in the pool. It is read again with the current areas."""
+    c = _candidate(app_no)
+    _need(c, {"archived"}, "Restoring")
+    if not db.update_candidate(c.id, expect_status="archived", status="new", outcome=""):
+        raise ActionError("The candidate changed while you were working. Reload the page.")
+    db.log_event(c.id, "HR officer", "Restored the CV to the pool. The Recruiter reads it again.")
+    return "new"
+
+
+def rescore_pool() -> dict:
+    """After an area is added, changed, turned off or on: score every CV in the pool again.
+    CVs with "No matching area" go back to the Recruiter, which reads them with the new list."""
+    areas = db.active_areas()
+    rescored = requeued = 0
+    for c in db.candidates_in({"in_pool"}):
+        profile = _profile(c)
+        scores = tools.score_all_areas(profile, c.cv_text, areas)
+        area, source = c.area, c.area_source
+        if area not in scores:                      # its best area was turned off or lost its skills
+            best = tools.top_areas(scores, n=1)
+            area, source = (best[0][0], "Chosen by rules") if best else ("", "")
+        fields = dict(area_scores=scores, area=area, area_source=source)
+        if area:
+            fields.update(score=scores[area]["score"], score_parts=scores[area]["parts"], gaps=scores[area]["gaps"])
+        else:
+            fields.update(status="no_area", score=None, score_parts={}, gaps=[])
+        if db.update_candidate(c.id, expect_status="in_pool", **fields):
+            rescored += 1
+    for c in db.candidates_in({"no_area"}):
+        if db.update_candidate(c.id, expect_status="no_area", status="new"):
+            db.log_event(c.id, "HR officer", "The areas changed, so the CV was sent back to the Recruiter.")
+            requeued += 1
+    return {"rescored": rescored, "requeued": requeued}
+
+
+# ---- Vacancies (HR officer) ----------------------------------------------------------
+def approve_suggestion(vacancy_id: int, app_no: str) -> dict:
+    """The HR officer approves a suggested CV for a vacancy. The candidate leaves the pool
+    and joins the normal hiring flow, and the Coordinator books the interview."""
+    v = db.get_vacancy(vacancy_id)
+    if v is None:
+        raise ActionError("There is no such vacancy.")
+    if v.status != "open":
+        raise ActionError(f"This vacancy is {v.status}.")
+    if not any(s["app_no"] == app_no and s["state"] == "suggested" for s in (v.suggestions or [])):
+        raise ActionError(f"{app_no} is not waiting for your approval on this vacancy.")
+    out = invite_from_pool(app_no, v.area)
+    c = _candidate(app_no)
+    db.update_candidate(c.id, vacancy_id=v.id)
+    rows = [dict(s) for s in v.suggestions]
+    for s in rows:
+        if s["app_no"] == app_no:
+            s["state"], s["at"] = "approved", db.now()
+    db.update_vacancy(v.id, suggestions=rows)
+    vacancies.mark_taken_elsewhere(app_no, v.id)
+    db.log_event(c.id, "HR officer", f"Approved for the {v.area} vacancy.")
+    return out
+
+
+def decline_suggestion(vacancy_id: int, app_no: str) -> None:
+    """The HR officer passes over a suggestion. The next best CV is suggested instead."""
+    v = db.get_vacancy(vacancy_id)
+    if v is None or v.status != "open":
+        raise ActionError("There is no open vacancy with that number.")
+    rows = [dict(s) for s in (v.suggestions or [])]
+    if not any(s["app_no"] == app_no and s["state"] == "suggested" for s in rows):
+        raise ActionError(f"{app_no} is not waiting for your approval on this vacancy.")
+    for s in rows:
+        if s["app_no"] == app_no:
+            s["state"], s["at"] = "failed", db.now()
+    db.update_vacancy(v.id, suggestions=rows)
+    vacancies.refresh_suggestions(db.get_vacancy(v.id))
+
+
+def add_vacancy(area_name: str, places: int, reason: str, opens_on: str = "") -> int:
+    """The HR officer opens a vacancy by hand, for example when an intern leaves early."""
+    area = db.area_by_name(area_name)
+    if area is None or not area.active:
+        raise ActionError(f'"{area_name}" is not an active area.')
+    try:
+        places = int(places)
+    except (TypeError, ValueError):
+        raise ActionError("How many places? Type a number.") from None
+    if not 1 <= places <= 50:
+        raise ActionError("The number of places must be between 1 and 50.")
+    opens_on = (opens_on or "").strip()[:10] or date.today().isoformat()
+    with db.Session() as s:
+        v = db.Vacancy(area=area.name, places=places, opens_on=opens_on,
+                       reason=(reason or "").strip()[:500] or "Opened by the HR officer.",
+                       trainee_ids=[], suggestions=[], status="open", created_by="HR officer",
+                       created_at=db.now(), updated_at=db.now())
+        s.add(v)
+        s.commit()
+        vacancy_id = v.id
+    vacancies.refresh_suggestions(db.get_vacancy(vacancy_id))
+    return vacancy_id
+
+
+def close_vacancy(vacancy_id: int) -> None:
+    v = db.get_vacancy(vacancy_id)
+    if v is None:
+        raise ActionError("There is no such vacancy.")
+    if v.status != "open":
+        raise ActionError(f"This vacancy is already {v.status}.")
+    db.update_vacancy(v.id, status="closed", reason=v.reason + " - closed by the HR officer.")
 
 
 # ---- Interviewer -------------------------------------------------------------------------
@@ -198,6 +344,7 @@ def enter_result(app_no: str, result: str, comment: str = "") -> str:
                                result_at=db.now()):
         raise ActionError("The candidate changed while you were working. Reload the page.")
     db.log_event(c.id, "Interviewer", f"Entered the result: {result}." + (f" Comment: {comment}" if comment else ""))
+    vacancies.on_result(c.id)
     return new
 
 
@@ -214,7 +361,7 @@ RELEASE_MOVES = {
 
 
 def _draft_facts(c: db.Candidate) -> tuple[dict, list[str], list[str]]:
-    facts = {"name": c.name or "Student", "area": c.area or "the internship", "app_no": c.app_no,
+    facts = {"name": c.name or "Candidate", "area": c.area or "the role", "app_no": c.app_no,
              "interview": c.interview_label or None, "work_id": str(c.work_id) if c.work_id else None}
     facts = {k: v for k, v in facts.items() if v}
     return facts, [], []
@@ -245,7 +392,7 @@ def release_draft(draft_id: int) -> str:
             raise ActionError("This email is not waiting for release.")
         c = s.get(db.Candidate, d.candidate_id)
         if not c.email or not checks.EMAIL_RE.fullmatch(c.email):
-            raise ActionError("Add the student's email address on the candidate page before releasing.")
+            raise ActionError("Add the candidate's email address on the candidate page before releasing.")
         before, after, outcome = RELEASE_MOVES[d.kind]
         if c.status != before:
             raise ActionError(f"{c.app_no} is \"{config.STATUSES[c.status][0]}\", so this email cannot be released now.")
@@ -260,6 +407,8 @@ def release_draft(draft_id: int) -> str:
         s.commit()
         cid, label = c.id, KIND_LABELS[d.kind]
     db.log_event(cid, "HR officer", f"Released the {label}. It was saved to the outbox (not sent).")
+    if after == "closed":
+        vacancies.on_result(cid)
     return after
 
 

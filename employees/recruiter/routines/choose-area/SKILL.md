@@ -4,12 +4,12 @@ Starts when: the profile is ready
 Done by: the model, checked by plain code, with a second opinion from the scoring rules
 
 ## What it does
-Chooses the internship area that fits the student best, with reasons and evidence.
+Chooses the area that fits the candidate best, with reasons and evidence.
 
 ## Instructions for the model
-Choose the ONE area from the list that fits this student best.
+Choose the ONE area from the list that fits this candidate best.
 - Use the area names exactly as written in the list.
-- If the student clearly fits none of the areas, do not force one. Answer
+- If the candidate clearly fits none of the areas, do not force one. Answer
   "New area: <short name>" (for example "New area: Human Resources").
 - If you cannot tell, answer "Needs human review".
 - reasons: 1 to 3 short sentences saying why.
@@ -27,4 +27,4 @@ Reply with one JSON object only:
 
 ## If the checks keep failing
 The area with the best rule score is used if at least half of its required skills are in the
-CV. Otherwise the HR officer chooses the area.
+CV. Otherwise the CV goes to the pool with the label "No matching area".

@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "samples" / "src"
 OUT = ROOT / "samples"
 
-AS_DOCX = {"dilini_wickramasinghe"}
-AS_PDF = {"tharushi_madushani"}
+AS_DOCX = {"ananya_iyer", "sophie_dubois"}
+AS_PDF = {"laura_bennett", "hannah_schmidt"}
 
 
 def to_docx(text: str, path: Path) -> None:

@@ -7,12 +7,12 @@ Done by: the model drafts, plain code checks
 Drafts the acceptance email with the area and the work ID.
 
 ## Instructions for the model
-Write a short, warm email to tell the student they have been selected for an internship.
-- Greet the student by first name and congratulate them.
-- Say the internship area exactly as given in the facts.
+Write a short, warm email to tell the candidate they have been selected for the position.
+- Greet the candidate by first name and congratulate them.
+- Say the area exactly as given in the facts.
 - Give the work ID exactly as given in the facts, and ask them to use it in all messages.
-- Say the team will contact them with the induction details.
-- End with: "Kind regards," and "SLT Internship Team".
+- Say the team will contact them with the onboarding details.
+- End with: "Kind regards," and "Hiring Team".
 - Use only the facts. Do not add dates, numbers, links or names.
 
 ## Output

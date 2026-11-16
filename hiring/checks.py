@@ -220,7 +220,7 @@ def check_draft(data: Any, facts: dict, must_include: list[str], must_not_includ
     low = text.lower()
     first_name = (facts.get("name") or "").split()[0] if facts.get("name") else ""
     if first_name and first_name.lower() not in low:
-        problems.append(f'The email must greet the student by name ("{first_name}").')
+        problems.append(f'The email must greet the candidate by name ("{first_name}").')
     for item in must_include:
         if item and str(item).lower() not in low:
             problems.append(f'The email must include "{item}" exactly as given.')

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Starts the SLT AI Employee web app on http://localhost:8000
+# Starts the HR Hiring web app on http://localhost:8000
 cd "$(dirname "$0")"
 if [ ! -x .venv/bin/python ]; then
   echo "Run ./setup.sh first."

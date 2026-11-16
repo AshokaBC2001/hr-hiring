@@ -157,11 +157,11 @@ def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[
     experience = profile.get("experience") or []
     relevant_exp = [e for e in experience if any(CVText(e).has(t) for t in terms)]
     if relevant_exp:
-        exp_pts, exp_why = w["experience"], "Has related work or internship experience"
+        exp_pts, exp_why = w["experience"], "Has related work experience"
     elif experience:
         exp_pts, exp_why = w["experience"] / 2, "Has some experience, not related to this area"
     else:
-        exp_pts, exp_why = 0, "No work experience (normal for a student)"
+        exp_pts, exp_why = 0, "No work experience listed"
 
     parts = {
         "skills": {"points": round(skills_pts), "max": w["skills"],
@@ -174,6 +174,24 @@ def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[
     }
     total = round(skills_pts + projects_pts + edu_pts + exp_pts)
     return total, parts, gaps
+
+
+def score_all_areas(profile: dict, cv_text: str, areas: list) -> dict:
+    """Scores the CV against every area (plain code). Returns {area name: {score, parts, gaps}}.
+    Areas without required skills are left out, because they cannot be scored."""
+    out = {}
+    for a in areas:
+        total, parts, gaps = score_cv(profile, cv_text, a)
+        if total is not None:
+            out[a.name] = {"score": total, "parts": parts, "gaps": gaps}
+    return out
+
+
+def top_areas(area_scores: dict, skip: tuple = (), n: int | None = None) -> list[tuple[str, int]]:
+    """The areas with the highest scores, best first, leaving out the names in skip."""
+    rows = sorted(((k, v["score"]) for k, v in (area_scores or {}).items() if k not in skip),
+                  key=lambda x: (-x[1], x[0]))
+    return rows[:n] if n else rows
 
 
 def shortlist_status(score: int) -> str:
@@ -219,12 +237,12 @@ def pick_interview_slot(taken: set[str], today: date | None = None) -> tuple[str
 def induction_checklist(area) -> list[dict]:
     name = area.name if area else "the team"
     items = [
-        "Send the internship agreement and get it signed",
-        "Collect the university letter confirming the internship period",
-        "Create the intern's SLT accounts and email",
+        "Send the offer letter and get it signed",
+        "Collect the documents needed before the start date",
+        "Create the new team member's accounts and email",
         f"Assign a mentor in {name}",
-        f"Add the intern to the {name} team channel",
-        "Book a place in the next induction session",
+        f"Add the new team member to the {name} team channel",
+        "Book a place in the next onboarding session",
     ]
     for extra in (area.checklist if area else []) or []:
         if extra not in items:
@@ -233,44 +251,44 @@ def induction_checklist(area) -> list[dict]:
 
 
 # ---- Reply templates (used when the model's draft fails the checks) ----------------
-SIGN_OFF = "Kind regards,\nSLT Internship Team"
+SIGN_OFF = "Kind regards,\nHiring Team"
 
 
 def template_draft(kind: str, facts: dict) -> dict:
     first = (facts.get("name") or "there").split()[0]
-    area = facts.get("area") or "the internship"
+    area = facts.get("area") or "the role"
     app_no = facts.get("app_no", "")
     if kind == "invitation":
-        return {"subject": f"Interview invitation - {area} internship",
-                "body": (f"Dear {first},\n\nThank you for applying for an internship at SLT. We are pleased to "
+        return {"subject": f"Interview invitation - {area}",
+                "body": (f"Dear {first},\n\nThank you for your application. We are pleased to "
                          f"invite you to an interview for the {area} area.\n\nDate and time: {facts.get('interview')}\n"
                          f"Application number: {app_no}\n\nPlease reply to this email to confirm that you can "
                          f"attend. If the time does not suit you, tell us and we will find another slot.\n\n{SIGN_OFF}")}
     if kind == "acceptance":
-        return {"subject": f"Internship offer - {area}",
+        return {"subject": f"Offer - {area}",
                 "body": (f"Dear {first},\n\nCongratulations. We are happy to tell you that you have been selected "
-                         f"for an internship in the {area} area at SLT.\n\nYour work ID is {facts.get('work_id')}. "
+                         f"for the {area} position.\n\nYour work ID is {facts.get('work_id')}. "
                          f"Please use it in all messages with us.\n\nOur team will contact you soon with the "
-                         f"induction details and the documents to sign.\n\n{SIGN_OFF}")}
+                         f"onboarding details and the documents to sign.\n\n{SIGN_OFF}")}
     if kind == "hold":
-        return {"subject": "Update on your internship interview",
-                "body": (f"Dear {first},\n\nThank you for attending the interview for the {area} internship. "
+        return {"subject": "Update on your interview",
+                "body": (f"Dear {first},\n\nThank you for attending the interview for the {area} position. "
                          f"Your result is on hold for now, and we will contact you as soon as a decision is made. "
                          f"You do not need to do anything at this stage.\n\n{SIGN_OFF}")}
     if kind == "rejection":
-        return {"subject": "Your internship interview result",
-                "body": (f"Dear {first},\n\nThank you for attending the interview for the {area} internship and for "
-                         f"your interest in SLT. After careful thought, we are not able to offer you a place this "
-                         f"time. We wish you every success in your studies and future career.\n\n{SIGN_OFF}")}
+        return {"subject": "Your interview result",
+                "body": (f"Dear {first},\n\nThank you for attending the interview for the {area} position and for "
+                         f"your interest in joining us. After careful thought, we are not able to offer you a place this "
+                         f"time. We wish you every success in your future career.\n\n{SIGN_OFF}")}
     # not shortlisted
-    return {"subject": "Your internship application",
-            "body": (f"Dear {first},\n\nThank you for applying for an internship at SLT. We have reviewed your "
+    return {"subject": "Your application",
+            "body": (f"Dear {first},\n\nThank you for applying to join us. We have reviewed your "
                      f"application carefully, and we are not able to invite you to an interview this time. We "
                      f"encourage you to keep building your skills and to apply again in the future.\n\n{SIGN_OFF}")}
 
 
 def template_questions(area_name: str, gaps: list[str], profile: dict) -> list[str]:
-    qs = [f"What made you interested in an internship in {area_name}?"]
+    qs = [f"What made you interested in working in {area_name}?"]
     projects = profile.get("projects") or []
     if projects:
         qs.append(f"Tell us about your project \"{projects[0][:80]}\". What was your own part in it?")

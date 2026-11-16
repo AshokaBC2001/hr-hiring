@@ -1,7 +1,7 @@
 """Talks to the local model through llama.cpp's llama-server (OpenAI-style API).
 
 This is the only file that knows how the model is reached. To use another
-server or model later, change the settings in config.py (or the SLT_MODEL_URL
+server or model later, change the settings in config.py (or the HR_MODEL_URL
 environment variable). Nothing is sent outside this computer.
 """
 from __future__ import annotations

@@ -109,26 +109,26 @@ class FakeModel:
         f = _block_json(text, "FACTS") or {}
         first = f.get("first_name", "there")
         area = f.get("area", "")
-        sign = "\n\nKind regards,\nSLT Internship Team"
+        sign = "\n\nKind regards,\nHiring Team"
         if routine == "invite-and-slots":
-            return {"subject": f"Invitation to interview for the {area} internship",
+            return {"subject": f"Invitation to interview for the {area} position",
                     "body": (f"Dear {first},\n\nThank you for your application ({f.get('app_no')}). We would like to "
-                             f"invite you to an interview for the {area} internship on {f.get('interview')}. "
+                             f"invite you to an interview for the {area} position on {f.get('interview')}. "
                              f"Please reply to confirm that you can attend.{sign}")}
         if routine == "draft-acceptance":
-            return {"subject": f"Welcome to the {area} internship at SLT",
-                    "body": (f"Dear {first},\n\nCongratulations! You have been selected for the {area} internship. "
+            return {"subject": f"Welcome to the {area} team",
+                    "body": (f"Dear {first},\n\nCongratulations! You have been selected for the {area} position. "
                              f"Your work ID is {f.get('work_id')}. Please use it in all your messages with us. "
-                             f"Our team will contact you soon with the induction details.{sign}")}
+                             f"Our team will contact you soon with the onboarding details.{sign}")}
         if routine == "reply-failed-or-hold" and f.get("message_type") == "hold":
             return {"subject": "Your interview result",
                     "body": (f"Dear {first},\n\nThank you for attending the interview. Your result is on hold for "
                              f"now, and we will contact you when a decision has been made. Thank you for your "
                              f"patience.{sign}")}
-        return {"subject": "Your internship application",
-                "body": (f"Dear {first},\n\nThank you for your interest in an internship at SLT. After careful "
+        return {"subject": "Your application",
+                "body": (f"Dear {first},\n\nThank you for your interest in joining us. After careful "
                          f"review we are not able to take your application further this time. We wish you the "
-                         f"very best with your studies.{sign}")}
+                         f"very best for the future.{sign}")}
 
     # ---- bad answers (to test checks and fixes) ----
     def bad_answer(self, routine: str) -> str:
@@ -141,13 +141,13 @@ class FakeModel:
         if routine == "prepare-questions":
             return json.dumps({"questions": ["Tell me about yourself"]})
         if routine == "morning-brief":
-            return json.dumps({"brief": "Good morning. 999 students applied today and 42 need you now. "
+            return json.dumps({"brief": "Good morning. 999 candidates applied today and 42 need you now. "
                                         "Everything else is fine and the team did a great job overall today."})
         if routine == "parse-not-json":
             return "Sure! Here is the profile."
         return json.dumps({"subject": "Hello", "body": "Dear [Name], please come within 14 days. "
                                                        "We look forward to it very much and hope you can join us soon. "
-                                                       "Thank you for your time and interest in our programme."})
+                                                       "Thank you for your time and interest in joining us."})
 
 
 # ---- run as a server -------------------------------------------------------------------

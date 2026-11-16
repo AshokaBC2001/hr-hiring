@@ -7,7 +7,7 @@ Done by: the model, checked by plain code
 Writes interview questions for the interviewer, based on the profile and the skill gaps.
 
 ## Instructions for the model
-Write 5 or 6 interview questions for this student.
+Write 5 or 6 interview questions for this candidate.
 - At least one question about a project in the profile.
 - At least one question about a skill gap, if there are gaps.
 - One question about why they chose this area.

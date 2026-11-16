@@ -11,7 +11,7 @@ Write a short morning brief for the HR officer in plain English, 60 to 150 words
 - Then say what the AI employees did in the last 24 hours.
 - Mention stalled candidates if there are any.
 - Use only the numbers in the facts. Do not add other numbers.
-- Do not use student names.
+- Do not use candidate names.
 
 ## Output
 Reply with one JSON object only:

@@ -87,3 +87,13 @@ STATUSES = {
 # Statuses where a person (the HR officer) must act.
 HR_STATUSES = {"needs_person", "needs_area", "borderline", "not_shortlisted_check"}
 RELEASE_STATUSES = {"invite_ready", "hold_note_ready", "reply_ready", "offer_ready"}
+
+# ---- SLT TalentHub (external intern DB + read-only REST API) --------------------
+TALENT_HUB_MONGO_URI = os.environ.get("TALENT_HUB_MONGO_URI", "mongodb://127.0.0.1:27017")
+TALENT_HUB_DB_NAME = os.environ.get("TALENT_HUB_DB_NAME", "slt_talent_hub_sample")
+TALENT_HUB_COLLECTION = os.environ.get("TALENT_HUB_COLLECTION", "interns")
+TALENT_HUB_TIMEOUT_MS = int(os.environ.get("TALENT_HUB_TIMEOUT_MS", "2000"))
+TALENT_HUB_API_URL = os.environ.get("TALENT_HUB_API_URL", "http://127.0.0.1:5000/api").rstrip("/")
+TALENT_HUB_API_TOKEN = os.environ.get("TALENT_HUB_API_TOKEN", "talenthub-local-dev-token")
+TALENT_HUB_MOCK_HOST = os.environ.get("TALENT_HUB_MOCK_HOST", "127.0.0.1")
+TALENT_HUB_MOCK_PORT = int(os.environ.get("TALENT_HUB_MOCK_PORT", "5000"))

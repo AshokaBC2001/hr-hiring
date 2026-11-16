@@ -395,3 +395,21 @@ def test_cli_run_interns_and_seed_handle_unavailable_cleanly(monkeypatch, capsys
     out_seed = capsys.readouterr().out
     assert rc_seed == 1
     assert "Error:" in out_seed and "TALENT_HUB_MONGO_URI" in out_seed
+
+
+def test_web_static_exposes_interns_page(tmp_path, monkeypatch):
+    from hiring.server import app
+
+    monkeypatch.setattr(config, "SCHEDULER_ENABLED", False)
+    db.setup(tmp_path / "data")
+    llm.set_backend(FakeModel())
+    try:
+        with TestClient(app) as client:
+            js = client.get("/app.js")
+            css = client.get("/style.css")
+            assert js.status_code == 200
+            assert css.status_code == 200
+            assert '"/api/interns' in js.text and "pInterns" in js.text
+            assert ".intern-stats" in css.text
+    finally:
+        llm.set_backend(None)

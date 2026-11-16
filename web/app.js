@@ -20,7 +20,8 @@ let STATE = null;
 let lastHTML = "";
 let current = { page: "", arg: "" };
 const UI = { showCv: false, showRuns: false, editDraft: null, editEmail: false, candFilter: "selected", candQuery: "",
-             repliesTab: "waiting", showAll: "", files: [], uploadResults: null, areas: null };
+             repliesTab: "waiting", showAll: "", files: [], uploadResults: null, areas: null,
+             internFilter: "all", internSpec: "", internQuery: "", interns: null, internsError: "" };
 
 async function api(path, { method = "GET", body, form } = {}) {
   const opt = { method, headers: { "X-Role": ROLE } };
@@ -47,6 +48,12 @@ function fmtTime(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return iso;
   return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
 }
 
 // Colour is used only for Pass, Fail and "Needs you".
@@ -104,7 +111,7 @@ function confirmBox({ heading, text, ok = "Confirm", danger = false }) {
 // ---------------------------------------------------------------- frame: top menu, model, role
 const NAV = {
   hr: [["dashboard", "Dashboard"], ["add", "Add CV"], ["candidates", "Candidates"], ["review", "Review queue", "review"],
-       ["replies", "Replies", "release"], ["areas", "Areas"], ["team", "AI team"]],
+       ["replies", "Replies", "release"], ["areas", "Areas"], ["team", "AI team"], ["interns", "Interns"]],
   interviewer: [["interviews", "Interviews", "interview"], ["team", "AI team"]],
 };
 const HOME = { hr: "#/dashboard", interviewer: "#/interviews" };
@@ -490,6 +497,139 @@ async function pTeam() {
     </div>`).join("")}</div>`);
 }
 
+// ================================================================ TalentHub interns (MongoDB view)
+function internPhase(r) {
+  const now = new Date();
+  const todayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const todayEnd = todayStart + 86400000 - 1;
+  const s = Date.parse(r.Training_StartDate);
+  const e = Date.parse(r.Training_EndDate);
+  if (isNaN(s) || isNaN(e)) return { key: "active", label: "Unknown", cls: "" };
+  if (e < todayStart) return { key: "completed", label: "Completed", cls: "" };
+  if (s > todayEnd) return { key: "upcoming", label: "Upcoming", cls: "info" };
+  return { key: "active", label: "Active", cls: "pass" };
+}
+
+function filteredInterns(rows) {
+  const q = UI.internQuery.trim().toLowerCase();
+  return rows.filter((r) => {
+    if (UI.internFilter !== "all" && internPhase(r).key !== UI.internFilter) return false;
+    if (UI.internSpec && r.field_of_spec_name !== UI.internSpec) return false;
+    if (q) {
+      const hay = [r.Trainee_ID, r.Trainee_Name, r.field_of_spec_name, r.Trainee_Email, r.Institute].join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+function renderInternTable(rows) {
+  const wrap = $("#intern-table-wrap");
+  if (!wrap) return;
+  const shown = filteredInterns(rows);
+  const countEl = $("#intern-shown");
+  if (countEl) countEl.textContent = `Showing ${shown.length} of ${rows.length} intern(s)`;
+  if (!shown.length) {
+    wrap.innerHTML = empty(rows.length ? "No interns match your filters." : "No interns found in TalentHub.");
+    return;
+  }
+  wrap.innerHTML = `<table class="t list"><thead><tr><th>Trainee ID</th><th>Name</th><th>Start Date (UTC)</th><th>End Date (UTC)</th><th>Specialization</th><th>Cohort</th><th></th></tr></thead><tbody>
+    ${shown.map((r) => {
+      const ph = internPhase(r);
+      const meta = [r.Trainee_Email, r.Institute].filter(Boolean).join(" · ");
+      return `<tr class="click" data-act="intern-detail" data-id="${esc(r.Trainee_ID)}">
+        <td><b class="mono">${esc(r.Trainee_ID)}</b></td>
+        <td>${esc(r.Trainee_Name)}${meta ? `<div class="small muted">${esc(meta)}</div>` : ""}</td>
+        <td>${esc(fmtDate(r.Training_StartDate))}<div class="small muted mono">${esc(r.Training_StartDate)}</div></td>
+        <td>${esc(fmtDate(r.Training_EndDate))}<div class="small muted mono">${esc(r.Training_EndDate)}</div></td>
+        <td>${tag(r.field_of_spec_name)}</td>
+        <td>${tag(ph.label, ph.cls)}</td>
+        <td style="text-align:right"><button type="button" class="btn small" data-act="intern-detail" data-id="${esc(r.Trainee_ID)}">View</button></td>
+      </tr>`;
+    }).join("")}</tbody></table>`;
+}
+
+async function openInternDetail(id) {
+  openDialog(`<h3>Intern ${esc(id)}</h3><p class="muted">Loading record from TalentHub...</p>`);
+  try {
+    const r = await api(`/api/interns/${encodeURIComponent(id)}`);
+    const ph = internPhase(r);
+    $("#dialog-body").innerHTML = `
+      <div class="box-head" style="margin-bottom:10px">
+        <h3 style="margin:0">${esc(r.Trainee_Name)}</h3>
+        ${tag(ph.label, ph.cls)}
+        <div class="spacer"></div>
+        <span class="mono muted">ID ${esc(r.Trainee_ID)}</span>
+      </div>
+      <div class="grid two">
+        <div class="field"><div class="label">Trainee ID</div><div class="mono">${esc(r.Trainee_ID)}</div></div>
+        <div class="field"><div class="label">Specialization</div><div>${esc(r.field_of_spec_name)}</div></div>
+        <div class="field"><div class="label">Start Date</div><div>${esc(fmtDate(r.Training_StartDate))}</div><div class="small muted mono">${esc(r.Training_StartDate)}</div></div>
+        <div class="field"><div class="label">End Date</div><div>${esc(fmtDate(r.Training_EndDate))}</div><div class="small muted mono">${esc(r.Training_EndDate)}</div></div>
+        ${r._id ? `<div class="field"><div class="label">MongoDB _id</div><div class="mono">${esc(r._id)}</div></div>` : ""}
+        ${r.Trainee_Email ? `<div class="field"><div class="label">Email</div><div>${esc(r.Trainee_Email)}</div></div>` : ""}
+        ${r.Institute ? `<div class="field"><div class="label">Institute</div><div>${esc(r.Institute)}</div></div>` : ""}
+      </div>
+      <div class="field" style="margin-top:14px">
+        <div class="label">Raw TalentHub / MongoDB Document</div>
+        <pre class="json-box mono">${esc(JSON.stringify(r, null, 2))}</pre>
+      </div>
+      <div class="actions"><button type="button" class="btn primary" data-dlg="close">Close</button></div>`;
+    $("#dialog-body").querySelector('[data-dlg="close"]').onclick = closeDialog;
+  } catch (e) {
+    $("#dialog-body").innerHTML = `<h3>Intern ${esc(id)}</h3><p class="muted">${esc(e.message)}</p>
+      <div class="actions"><button type="button" class="btn" data-dlg="close">Close</button></div>`;
+    $("#dialog-body").querySelector('[data-dlg="close"]').onclick = closeDialog;
+  }
+}
+
+async function pInterns() {
+  title("Interns (TalentHub)");
+  UI.internsError = "";
+  const [sRes, iRes] = await Promise.allSettled([api("/api/state"), api("/api/interns?limit=1000")]);
+  if (sRes.status === "fulfilled") { STATE = sRes.value; renderFrame(); }
+  if (iRes.status === "fulfilled") {
+    UI.interns = iRes.value.interns || [];
+  } else {
+    UI.interns = [];
+    UI.internsError = iRes.reason?.message || "Could not load interns from TalentHub.";
+  }
+
+  const rows = UI.interns;
+  const th = STATE?.talent_hub;
+  const banner = UI.internsError
+    ? notice("error", "TalentHub API is not reachable.", UI.internsError + " Run ./start_talent_hub.sh in another terminal.", `<button type="button" class="btn small" data-act="intern-refresh">Retry</button>`)
+    : notice("ok", "Connected to SLT TalentHub (MongoDB sample).", `${rows.length} intern record(s) loaded from ${th?.url || "TalentHub API"}.`, `<button type="button" class="btn small" data-act="intern-refresh">Refresh</button>`);
+
+  const specs = Array.from(new Set(rows.map((r) => r.field_of_spec_name).filter(Boolean))).sort();
+  if (UI.internSpec && !specs.includes(UI.internSpec)) UI.internSpec = "";
+  const activeCount = rows.filter((r) => internPhase(r).key === "active").length;
+  const stats = `
+    <div class="intern-stats">
+      <div class="intern-stat"><b>${esc(rows.length)}</b><span>Total interns</span></div>
+      <div class="intern-stat"><b>${esc(activeCount)}</b><span>Active today (UTC)</span></div>
+      <div class="intern-stat"><b>${esc(specs.length)}</b><span>Specializations</span></div>
+    </div>`;
+
+  const tabs = [["all", "All"], ["active", "Active"], ["completed", "Completed"], ["upcoming", "Upcoming"]];
+  setView(`${banner}${stats}
+    <div class="box">${boxHead("Intern records", `<span class="small muted" id="intern-shown"></span>`)}
+      <div class="filters">
+        <div class="tabs">${tabs.map(([k, l]) => `<button type="button" class="${UI.internFilter === k ? "on" : ""}" data-act="intern-filter" data-f="${k}">${esc(l)}</button>`).join("")}</div>
+        <select class="spec-select" id="intern-spec" aria-label="Filter by specialization">
+          <option value="">All specializations</option>
+          ${specs.map((sp) => `<option value="${esc(sp)}" ${UI.internSpec === sp ? "selected" : ""}>${esc(sp)}</option>`).join("")}
+        </select>
+        <input type="search" class="search" id="intern-q" placeholder="Search ID, name, specialization" value="${esc(UI.internQuery)}">
+      </div>
+      <div id="intern-table-wrap"></div>
+    </div>`);
+
+  renderInternTable(rows);
+  $("#intern-spec").onchange = (e) => { UI.internSpec = e.target.value; renderInternTable(rows); };
+  $("#intern-q").oninput = (e) => { UI.internQuery = e.target.value; renderInternTable(rows); };
+}
+
 // ================================================================ Interviewer pages
 async function pInterviews() {
   title("Interviews");
@@ -617,6 +757,13 @@ const ACTS = {
   },
   "run": (b) => act(() => api("/api/run", { method: "POST", body: { employee: b.dataset.who } }), "Started. Watch the status update."),
   "pause": (b) => act(() => api("/api/pause", { method: "POST", body: { paused: b.dataset.p === "1" } }), b.dataset.p === "1" ? "The AI team is paused." : "The AI team is working again."),
+  "intern-refresh": () => { lastHTML = ""; pInterns(); },
+  "intern-filter": (b) => {
+    UI.internFilter = b.dataset.f;
+    view.querySelectorAll("[data-act='intern-filter']").forEach((el) => el.classList.toggle("on", el.dataset.f === UI.internFilter));
+    if (UI.interns) renderInternTable(UI.interns);
+  },
+  "intern-detail": (b) => openInternDetail(b.dataset.id),
   "save-result": async () => {
     const picked = document.querySelector('input[name="result"]:checked');
     if (!picked) { toast("Choose Pass, Fail or Hold first.", true); return; }
@@ -636,7 +783,7 @@ view.addEventListener("click", (e) => {
 
 // ================================================================ router
 const ROUTES = {
-  hr: { dashboard: pDashboard, add: pAdd, candidates: pCandidates, candidate: pCandidate, review: pReview, replies: pReplies, areas: pAreas, team: pTeam },
+  hr: { dashboard: pDashboard, add: pAdd, candidates: pCandidates, candidate: pCandidate, review: pReview, replies: pReplies, areas: pAreas, team: pTeam, interns: pInterns },
   interviewer: { interviews: pInterviews, interview: pInterview, team: pTeam, candidate: pCandidate },
 };
 const AUTO = new Set(["dashboard", "candidates", "candidate", "review", "replies", "team", "interviews", "interview"]);

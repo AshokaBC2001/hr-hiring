@@ -135,7 +135,7 @@ ALIASES = {
     "artificial intelligence": "AI/ML", "data science": "AI/ML", "ai and ml": "AI/ML",
     "dev ops": "DevOps", "devops": "DevOps", "ml ops": "MLOps", "mlops": "MLOps",
     "flutter": "Flutter", "mobile": "Flutter", "mobile development": "Flutter",
-    "mobile app development": "Flutter",
+    "mobile app development": "Flutter", "network engineering": "Networking",
 }
 
 

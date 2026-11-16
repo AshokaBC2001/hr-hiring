@@ -11,7 +11,7 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* private window */ } },
 };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const AI_ACTORS = new Set(["Recruiter", "Coordinator", "Onboarding", "Chief of staff"]);
+const AI_ACTORS = new Set(["Recruiter", "Coordinator", "Onboarding", "Planner", "Chief of staff"]);
 const APP_NAME = "HR Hiring";
 
 let ROLE = store.get("hr-hiring-role", "hr");
@@ -20,9 +20,10 @@ let STATE = null;
 let lastHTML = "";
 let current = { page: "", arg: "" };
 const UI = { showCv: false, showRuns: false, editDraft: null, editEmail: false, candFilter: "selected", candQuery: "",
+             poolArea: "", poolShow: "all", poolQuery: "", vacShow: "open", candidateInPool: false,
              repliesTab: "waiting", showAll: "", files: [], uploadResults: null, areas: null,
              internFilter: "all", internSpec: "", internQuery: "", internPage: 1, internPageSize: 50,
-             internSortCol: "Trainee_ID", internSortDir: 1, interns: null, internsError: "" };
+             internSortCol: "Trainee_ID", internSortDir: 1, interns: null, internStats: null, internsError: "" };
 
 async function api(path, { method = "GET", body, form } = {}) {
   const opt = { method, headers: { "X-Role": ROLE } };
@@ -111,8 +112,9 @@ function confirmBox({ heading, text, ok = "Confirm", danger = false }) {
 
 // ---------------------------------------------------------------- frame: top menu, model, role
 const NAV = {
-  hr: [["dashboard", "Dashboard"], ["add", "Add CV"], ["candidates", "Candidates"], ["review", "Review queue", "review"],
-       ["replies", "Replies", "release"], ["areas", "Areas"], ["team", "AI team"], ["interns", "Interns"]],
+  hr: [["dashboard", "Dashboard"], ["add", "Add CV"], ["pool", "Pool"], ["vacancies", "Vacancies", "vacancies"],
+       ["candidates", "Candidates"], ["review", "Review queue", "review"], ["replies", "Replies", "release"],
+       ["interns", "Interns"], ["areas", "Areas"], ["team", "AI team"]],
   interviewer: [["interviews", "Interviews", "interview"], ["team", "AI team"]],
 };
 const HOME = { hr: "#/dashboard", interviewer: "#/interviews" };
@@ -121,7 +123,8 @@ function renderFrame() {
   const t = STATE ? STATE.tiles : {};
   $("#nav").innerHTML = NAV[ROLE].map(([key, label, countKey]) => {
     const count = countKey && t[countKey] ? `<span class="count">${esc(t[countKey])}</span>` : "";
-    const on = current.page === key || (key === "candidates" && current.page === "candidate") || (key === "interviews" && current.page === "interview");
+    const onCandidate = current.page === "candidate" && (key === (UI.candidateInPool ? "pool" : "candidates"));
+    const on = current.page === key || onCandidate || (key === "interviews" && current.page === "interview");
     return `<a class="${on ? "on" : ""}" href="#/${key}">${esc(label)}${count}</a>`;
   }).join("");
   $("#brand").href = HOME[ROLE];
@@ -134,7 +137,11 @@ function renderFrame() {
   el.className = "model" + (down ? " down" : "");
   el.title = down ? ((STATE.notice && STATE.notice.text) || m.detail || "") : m.model;
   const working = Object.values(STATE.team).find((x) => x.state === "working");
-  $("#foot").textContent = `${APP_NAME} - prototype. Emails are drafted only, never sent. AI team: ${STATE.paused ? "paused" : working ? working.name + " is working" : "waiting for work"}.`;
+  const em = STATE.email || {};
+  const mailText = em.enabled
+    ? (em.test_recipient ? `Email: Live SMTP (demo redirect to ${em.test_recipient})` : `Email: Live SMTP (${em.host})`)
+    : "Email: Outbox archive only";
+  $("#foot").textContent = `${APP_NAME} - ${mailText}. AI team: ${STATE.paused ? "paused" : working ? working.name + " is working" : "waiting for work"}.`;
 }
 async function refreshState() {
   try { STATE = await api("/api/state"); } catch { return; }
@@ -167,7 +174,12 @@ function modelNotice() {
 }
 function mailBlock(d, { showCandidate = false } = {}) {
   const editing = UI.editDraft === d.id;
-  const state = d.status === "waiting" ? tag("Waiting for release", ROLE === "hr" ? "need" : "") : d.status === "released" ? tag("Released") : tag(d.status);
+  const state = d.status === "waiting" ? tag("Waiting for release", ROLE === "hr" ? "need" : "")
+    : d.status === "released" ? tag("Released") : tag(d.status);
+  const deliveryBadge = d.status !== "released" ? ""
+    : d.delivery_status === "sent" ? tag("Sent via SMTP", "pass")
+    : d.delivery_status === "failed" ? tag("SMTP Failed", "fail")
+    : tag("Outbox only");
   const notes = (d.check_notes || []).map((n) => `<div class="warn">Warning: ${esc(n)}</div>`).join("");
   let foot = "";
   if (d.status === "waiting" && ROLE === "hr") {
@@ -177,16 +189,93 @@ function mailBlock(d, { showCandidate = false } = {}) {
          <button class="btn" data-act="edit-draft" data-id="${d.id}">Edit</button>
          ${d.can_release ? "" : `<span class="small muted">${esc(d.release_blocker || "The candidate is not at this step now.")}</span>`}</div>`;
   } else if (d.status === "released") {
-    foot = `<span class="small muted">Released ${esc(fmtTime(d.released_at))}. Saved to data/outbox/${esc(d.file)} (not sent).</span>`;
+    const info = d.delivery_status === "sent"
+      ? `Sent ${esc(fmtTime(d.sent_at || d.released_at))} to ${esc(d.sent_to || d.email)}. Archived at data/outbox/${esc(d.file)}.`
+      : d.delivery_status === "failed"
+      ? `Released ${esc(fmtTime(d.released_at))} (archived at data/outbox/${esc(d.file)}). SMTP error: ${esc(d.delivery_error || "Send failed")}`
+      : `Released ${esc(fmtTime(d.released_at))}. Saved to data/outbox/${esc(d.file)} (not sent via SMTP).`;
+    const retryBtn = ROLE === "hr" && d.email
+      ? `<button class="btn small" data-act="resend-draft" data-id="${d.id}">${d.delivery_status === "sent" ? "Resend SMTP" : "Send via SMTP"}</button>`
+      : "";
+    foot = `<div class="actions"><span class="small muted" style="flex:1">${info}</span>${retryBtn}</div>`;
   }
   const body = editing
     ? `<div class="mail-body editing"><div class="form-row"><label for="ed-subject">Subject</label><input type="text" id="ed-subject" value="${esc(d.subject)}"></div>
        <div class="form-row"><label for="ed-body">Email</label><textarea id="ed-body" rows="12">${esc(d.body)}</textarea></div></div>`
     : `<div class="mail-body"><b>${esc(d.subject)}</b>\n\n${esc(d.body)}</div>`;
   return `<div class="mail" id="mail-${d.id}">
-    <div class="mail-head"><b>${esc(d.kind_label)}</b>${state}${byText(d.written_by)}<span class="grow"></span>
+    <div class="mail-head"><b>${esc(d.kind_label)}</b>${state}${deliveryBadge}${byText(d.written_by)}<span class="grow"></span>
       ${showCandidate ? candLink(d.app_no) : ""}<span class="small muted">To: ${esc(d.name || "")} ${d.email ? "&lt;" + esc(d.email) + "&gt;" : "(no email yet)"}</span></div>
     ${notes}${body}${foot ? `<div class="mail-foot">${foot}</div>` : ""}</div>`;
+}
+
+async function openEmailSettings() {
+  openDialog(`<h3>Email sender settings (SMTP)</h3><p class="muted">Loading settings...</p>`);
+  try {
+    const cfg = await api("/api/email/settings");
+    $("#dialog-body").innerHTML = `
+      <h3>Email sender settings (SMTP)</h3>
+      <p class="small muted" style="margin:0 0 12px">Configure live SMTP delivery on release. All drafts are still archived in <code>data/outbox/</code>.</p>
+      <div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="sm-en" style="width:auto" ${cfg.enabled ? "checked" : ""}> Enable live SMTP sending when drafts are released</label></div>
+      <div class="grid two">
+        <div class="form-row"><label for="sm-host">SMTP Host</label><input type="text" id="sm-host" value="${esc(cfg.host)}" placeholder="smtp.gmail.com"></div>
+        <div class="form-row"><label for="sm-port">SMTP Port</label><input type="text" id="sm-port" value="${esc(cfg.port)}" placeholder="587"></div>
+        <div class="form-row"><label for="sm-user">SMTP Username</label><input type="text" id="sm-user" value="${esc(cfg.user)}" placeholder="you@gmail.com"></div>
+        <div class="form-row"><label for="sm-pass">SMTP Password / App Password</label><input type="password" id="sm-pass" placeholder="${cfg.has_password ? "Saved (leave blank to keep)" : "Enter password"}"></div>
+        <div class="form-row"><label for="sm-fname">From Name</label><input type="text" id="sm-fname" value="${esc(cfg.from_name)}"></div>
+        <div class="form-row"><label for="sm-femail">From Email</label><input type="email" id="sm-femail" value="${esc(cfg.from_email)}"></div>
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sm-tls" style="width:auto" ${cfg.use_tls ? "checked" : ""}> STARTTLS (port 587)</label>
+        <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sm-ssl" style="width:auto" ${cfg.use_ssl ? "checked" : ""}> SSL (port 465)</label>
+      </div>
+      <div class="form-row" style="margin-top:12px">
+        <label for="sm-test-to">Safe Demo Recipient Override (optional)</label>
+        <input type="email" id="sm-test-to" value="${esc(cfg.test_recipient)}" placeholder="your.real.inbox@gmail.com">
+        <div class="help">Recommended for demos: redirects sample @example.com emails to your own inbox instead of failing or bouncing.</div>
+      </div>
+      <div class="form-row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft)">
+        <label for="sm-probe">Send diagnostic test email</label>
+        <div class="actions">
+          <input type="email" id="sm-probe" style="flex:1" value="${esc(cfg.test_recipient || cfg.user)}" placeholder="recipient@gmail.com">
+          <button type="button" class="btn" data-dlg="test">Send test</button>
+        </div>
+      </div>
+      <div class="actions"><button type="button" class="btn" data-dlg="cancel">Cancel</button><button type="button" class="btn primary" data-dlg="save">Save settings</button></div>`;
+    const d = $("#dialog-body");
+    const collect = () => {
+      const payload = {
+        enabled: $("#sm-en").checked,
+        host: $("#sm-host").value,
+        port: $("#sm-port").value,
+        user: $("#sm-user").value,
+        from_name: $("#sm-fname").value,
+        from_email: $("#sm-femail").value,
+        use_tls: $("#sm-tls").checked,
+        use_ssl: $("#sm-ssl").checked,
+        test_recipient: $("#sm-test-to").value,
+      };
+      if ($("#sm-pass").value) payload.password = $("#sm-pass").value;
+      return payload;
+    };
+    d.querySelector('[data-dlg="cancel"]').onclick = closeDialog;
+    d.querySelector('[data-dlg="save"]').onclick = async () => {
+      try {
+        await api("/api/email/settings", { method: "POST", body: collect() });
+        closeDialog(); toast("Saved email sender settings."); lastHTML = ""; await refreshState(); render();
+      } catch (e) { toast(e.message, true); }
+    };
+    d.querySelector('[data-dlg="test"]').onclick = async () => {
+      try {
+        await api("/api/email/settings", { method: "POST", body: collect() });
+        const r = await api("/api/email/test", { method: "POST", body: { to: $("#sm-probe").value } });
+        toast(`Test email sent to ${r.sent_to}.`);
+      } catch (e) { toast(e.message, true); }
+    };
+  } catch (e) {
+    $("#dialog-body").innerHTML = `<h3>Email settings</h3><p class="muted">${esc(e.message)}</p><div class="actions"><button class="btn" data-dlg="cancel">Close</button></div>`;
+    $("#dialog-body").querySelector('[data-dlg="cancel"]').onclick = closeDialog;
+  }
 }
 
 // ================================================================ HR officer pages
@@ -196,13 +285,16 @@ async function pDashboard() {
   STATE = s;
   renderFrame();
   const t = s.tiles;
+  const vInfo = s.vacancies || { open: 0, places: 0, waiting: 0 };
   let next;
-  if (t.review) next = notice("need", `${t.review} item(s) need your decision or a quick check.`, "", `<a class="btn" href="#/review">Open Review queue</a>`);
-  else if (t.release) next = notice("need", `${t.release} email(s) are waiting for your release.`, "Nothing reaches a candidate until you release it.", `<a class="btn" href="#/replies">Open Replies</a>`);
+  if (t.vacancies) next = notice("need", `${t.vacancies} candidate(s) are suggested for ${vInfo.open} open vacancy(ies).`, `${vInfo.places} place(s) to fill.`, `<a class="btn" href="#/vacancies">Open Vacancies</a>`);
+  else if (t.review) next = notice("need", `${t.review} item(s) need your decision or a quick check.`, "", `<a class="btn" href="#/review">Open Review queue</a>`);
+  else if (t.release) next = notice("need", `${t.release} email(s) are waiting for your release.`, "Approve each message to send or archive it.", `<a class="btn" href="#/replies">Open Replies</a>`);
   else if (!s.total) next = notice("ok", "No CVs yet.", "Add a CV to start, or load the sample CVs.", `<a class="btn primary" href="#/add">Add CV</a>`);
   else next = notice("ok", "Nothing needs you right now.", "The AI team is handling the rest.");
   const nums = [
-    ["New CVs", t.new, "#/candidates/new", false],
+    ["New CVs", t.new, "#/pool/recent", false],
+    ["Vacancies to fill", vInfo.places, "#/vacancies", t.vacancies > 0],
     ["Needs your review", t.review, "#/review", t.review > 0],
     ["Emails to release", t.release, "#/replies", t.release > 0],
     ["In interview", t.interview, "#/candidates/interview", false],
@@ -229,10 +321,21 @@ async function pDashboard() {
         <td class="small muted">${e.last_run ? esc(fmtTime(e.last_run)) + "<br>" + esc(e.last_note) : "Not yet"}</td></tr>`).join("")}</tbody></table>`;
   const brief = s.brief ? `<p style="margin:0 0 6px">${esc(s.brief.text)}</p><div class="small muted">Chief of staff (${esc(s.brief.written_by)}) - ${esc(fmtTime(s.brief.created_at))}</div>`
     : `<p class="muted" style="margin:0">The Chief of staff writes a brief every morning at 08:00.</p>`;
+  const dbm = s.database || {};
+  const em = s.email || {};
+  const th = s.talent_hub || {};
 
   setView(`${modelNotice()}
     ${next}
-    <div class="nums">${nums}</div>
+    <div class="nums six">${nums}</div>
+    <div class="box">${boxHead("Database & Email summary", `<div class="actions"><button class="btn small" data-act="email-settings">Email settings</button><a class="btn small" href="/api/export/candidates.csv">Export Candidates CSV</a><a class="btn small" href="/api/export/database.json" download="hr_hiring_snapshot.json">Database JSON</a></div>`)}
+      <div class="small">
+        <b>SQLite Register:</b> ${esc(dbm.candidates ?? s.total)} total CVs (${esc(dbm.pool ?? 0)} in Pool, ${esc(dbm.selected ?? 0)} selected) &middot;
+        <b>MongoDB TalentHub:</b> ${th.ok ? tag(`${th.count ?? "?"} interns online`, "pass") : tag("Offline", "fail")} &middot;
+        <b>Email Delivery:</b> ${em.enabled ? tag(em.test_recipient ? `SMTP Demo -> ${em.test_recipient}` : "SMTP Live", "pass") : tag("Outbox only")}
+        (${esc(dbm.emails_sent ?? 0)} sent, ${esc(dbm.emails_outbox ?? 0)} outbox${dbm.emails_failed ? `, ${dbm.emails_failed} failed` : ""})
+      </div>
+    </div>
     <div class="box">${boxHead("Morning brief", `<button class="btn small" data-act="brief">Write brief now</button>`)}${brief}</div>
     <div class="box">${boxHead("Selected candidates by area", `<span class="small muted">Passed the interview</span> <a class="small" href="#/candidates/selected">View list</a>`)}${areaTable}</div>
     <div class="grid two even">
@@ -269,13 +372,15 @@ async function pAdd() {
             ${files.length ? `<button class="btn" data-act="clear-files">Clear</button>` : ""}</div>
         </div>
       </div></div>
-    ${results ? `<div class="box">${boxHead("Result")}${resultTable}</div>` : ""}
+    ${results ? `<div class="box">${boxHead("Result", `<a class="btn small" href="#/pool/recent">View in Pool</a>`)}${resultTable}
+      <p class="small muted" style="margin:8px 0 0">The Recruiter reads each CV and adds it to the Pool with its best area and scores across all active areas.</p></div>` : ""}
     <div class="box">${boxHead("What happens next")}<ol class="clean">
-      <li><b>Recruiter</b> reads the CV, chooses the area and scores the match. Every fact is checked against the CV.</li>
-      <li><b>You</b> decide borderline and low scores, and choose areas the AI is unsure about.</li>
+      <li><b>Recruiter</b> reads the CV, chooses the best area, scores it across all active areas and adds it to the Pool.</li>
+      <li><b>Planner</b> monitors intern finish dates in MongoDB (TalentHub), opens vacancies and suggests top CVs.</li>
+      <li><b>You</b> approve vacancy suggestions or invite candidates directly from the Pool.</li>
       <li><b>Coordinator</b> books an interview slot, prepares questions and drafts the invitation for you to release.</li>
       <li><b>Interviewer</b> does the interview and enters Pass, Fail or Hold.</li>
-      <li><b>Onboarding</b> issues the 4-digit work ID and drafts the acceptance email for you to release.</li></ol></div>
+      <li><b>Onboarding</b> issues the 4-digit work ID, prepares the interactive checklist and drafts the acceptance email.</li></ol></div>
     <div class="box">${boxHead("Try it with sample CVs")}<p class="small muted" style="margin-top:0">17 made-up candidates in PDF, Word and text files, for demos and testing. Three of them fit none of the areas.</p>
       <button class="btn" data-act="samples">Load the sample CVs</button></div>`);
   const input = $("#file-input");
@@ -310,18 +415,123 @@ async function pCandidates(arg) {
       <td>${statusTag(c)} ${c.open_flags ? tag(`${c.open_flags} note(s)`, ROLE === "hr" ? "need" : "") : ""}</td>
       <td class="small muted">${esc(c.next_actor || (c.outcome || "Done"))}</td></tr>`).join("")}</tbody></table>`
     : empty(rows.length ? "No candidate matches your search." : selected ? "No one has passed an interview yet." : "No candidates here.");
-  setView(`<div class="box">${boxHead("Candidates", `<a class="btn primary" href="#/add">Add CV</a>`)}
+  setView(`<div class="box">${boxHead("Candidates", `<div class="actions"><a class="btn small" href="/api/export/candidates.csv">Export CSV</a><a class="btn primary" href="#/add">Add CV</a></div>`)}
     <div class="filters"><div class="tabs">${FILTERS.map(([k, l]) => `<button class="${UI.candFilter === k ? "on" : ""}" data-act="filter" data-f="${k}">${esc(l)}</button>`).join("")}</div>
     <input type="search" class="search" id="cand-q" placeholder="Search name, number, area" value="${esc(UI.candQuery)}"></div>${body}</div>`);
   const qi = $("#cand-q");
   qi.oninput = () => { UI.candQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pCandidates().then(() => { const n = $("#cand-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
 }
 
+const POOL_SHOW = [["all", "All"], ["recent", "Recently added"], ["no_area", "No matching area"], ["archived", "Archived"]];
+async function pPool(arg) {
+  title("Pool");
+  if (POOL_SHOW.some((x) => x[0] === arg)) UI.poolShow = arg;
+  const qs = new URLSearchParams({ area: UI.poolArea, show: UI.poolShow, q: UI.poolQuery });
+  const r = await api(`/api/pool?${qs}`);
+  if (UI.poolArea && !r.area) UI.poolArea = "";
+  const st = r.stats;
+  const nums = [["CVs in pool", st.in_pool, "all"], ["Being read now", st.being_read, "recent"],
+    ["No matching area", st.no_area, "no_area"], ["Added today", st.added_today, "recent"]]
+    .map(([label, n, show]) => `<a class="num" href="#/pool/${show}"><b>${esc(n)}</b><span>${esc(label)}</span></a>`).join("");
+  const hint = UI.poolArea ? `Ranked by score for ${UI.poolArea}. Only CVs scoring ${r.min_score} or more are shown.`
+    : UI.poolShow === "recent" ? "CVs added in the last 24 hours, newest first."
+    : UI.poolShow === "archived" ? "Archived CVs are not deleted. Open one to restore it."
+    : UI.poolShow === "no_area" ? "No area on the list fits these CVs. They are read again when you add or change an area."
+    : "All waiting CVs, sorted by their best score. Choose an area to see its ranking.";
+  const rows = r.rows.length ? `<table class="t list pool-list"><thead><tr><th class="num-col">Rank</th><th>Candidate</th><th>Best area</th>
+      <th class="num-col">${UI.poolArea ? "Score for " + esc(UI.poolArea) : "Score"}</th><th>Other good areas</th><th>Skill gaps</th><th>Added</th><th>Status</th></tr></thead><tbody>
+    ${r.rows.map((c) => `<tr class="click" data-href="#/candidate/${encodeURIComponent(c.app_no)}">
+      <td class="num-col">${c.rank ?? "-"}</td>
+      <td>${esc(c.name)}<div class="small muted">${esc(c.app_no)}</div></td>
+      <td>${c.best_area ? esc(c.best_area) : c.suggested_new_area ? `<span class="small muted">Suggested: ${esc(c.suggested_new_area)}</span>` : `<span class="muted">-</span>`}</td>
+      <td class="num-col">${(UI.poolArea ? c.area_score : c.best_score) ?? "-"}</td>
+      <td class="small">${c.other_areas.length ? c.other_areas.map((o) => `${esc(o.area)} ${esc(o.score)}`).join(", ") : `<span class="muted">-</span>`}</td>
+      <td class="small muted">${c.gaps.length ? esc(c.gaps.join(", ")) : "-"}</td>
+      <td class="small muted">${esc(fmtTime(c.created_at))}</td>
+      <td>${statusTag(c)}</td></tr>`).join("")}</tbody></table>`
+    : empty(UI.poolArea ? `No CV in the pool scores ${r.min_score} or more for ${UI.poolArea}.` : UI.poolQuery ? "No CV matches your search." : "No CVs here.");
+  setView(`<div class="nums four">${nums}</div>
+    <div class="box">${boxHead("CV pool", `<a class="btn primary" href="#/add">Add CV</a>`)}
+      <div class="filters"><div class="tabs">${POOL_SHOW.map(([k, l]) => `<button class="${UI.poolShow === k ? "on" : ""}" data-act="pool-show" data-s="${k}">${esc(l)}${k === "archived" && st.archived ? ` (${esc(st.archived)})` : ""}</button>`).join("")}</div>
+        <select id="pool-area" style="width:auto"><option value="">All areas</option>${r.areas.map((a) => `<option ${a === UI.poolArea ? "selected" : ""}>${esc(a)}</option>`).join("")}</select>
+        <input type="search" class="search" id="pool-q" placeholder="Search name or number" value="${esc(UI.poolQuery)}"></div>
+      <p class="small muted" style="margin:0 0 8px">${esc(hint)}</p>${rows}</div>`);
+  $("#pool-area").onchange = (e) => { UI.poolArea = e.target.value; e.target.blur(); lastHTML = ""; pPool(); };
+  const qi = $("#pool-q");
+  qi.oninput = () => { UI.poolQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pPool().then(() => { const n = $("#pool-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
+}
+
+const VAC_SHOW = [["open", "Open"], ["done", "Filled and closed"], ["all", "All"]];
+async function pVacancies(arg) {
+  title("Vacancies");
+  if (VAC_SHOW.some((x) => x[0] === arg)) UI.vacShow = arg;
+  const r = await api(`/api/vacancies?show=${UI.vacShow}`);
+  const waiting = r.rows.reduce((n, v) => n + v.waiting, 0);
+  const places = r.rows.filter((v) => v.status === "open").reduce((n, v) => n + Math.max(0, v.places - v.filled), 0);
+  const nums = [["Open vacancies", r.counts.open, "open"], ["Places to fill", places, "open"],
+    ["Waiting for you", waiting, "open"], ["Filled", r.counts.filled, "done"]]
+    .map(([label, n, show]) => `<a class="num ${label === "Waiting for you" && n ? "need" : ""}" href="#/vacancies/${show}"><b>${esc(n)}</b><span>${esc(label)}</span></a>`).join("");
+  const card = (v) => {
+    const rows = v.suggestions.map((sg) => `<tr>
+      <td>${candLink(sg.app_no, sg.name)}<div class="small muted">${esc(sg.app_no)}</div></td>
+      <td class="num-col">${esc(sg.score ?? "-")}</td>
+      <td class="small muted">${sg.gaps && sg.gaps.length ? esc(sg.gaps.join(", ")) : "-"}</td>
+      <td>${sg.state === "passed" ? tag(sg.state_label, "pass") : sg.state === "suggested" ? tag(sg.state_label, "need") : tag(sg.state_label)}
+        ${sg.work_id ? `<div class="small muted">Work ID ${esc(sg.work_id)}</div>` : sg.state === "approved" && sg.status_label ? `<div class="small muted">${esc(sg.status_label)}</div>` : ""}</td>
+      <td style="text-align:right;white-space:nowrap">${sg.state === "suggested" && v.status === "open"
+        ? `<button class="btn small primary" data-act="vac-approve" data-v="${v.id}" data-a="${esc(sg.app_no)}" data-n="${esc(sg.name)}" data-area="${esc(v.area)}">Approve</button>
+           <button class="btn small" data-act="vac-decline" data-v="${v.id}" data-a="${esc(sg.app_no)}" data-n="${esc(sg.name)}">Not this one</button>` : ""}</td></tr>`).join("");
+    const head = `<span class="tag ${v.status === "filled" ? "pass" : ""}">${esc(v.status === "open" ? `${v.filled} of ${v.places} filled` : v.status === "filled" ? "Filled" : "Closed")}</span>
+      <span class="small muted">From ${esc(v.opens_on)} - opened by ${esc(v.created_by)}</span>
+      ${v.status === "open" ? `<button class="btn small" data-act="vac-close" data-v="${v.id}" data-area="${esc(v.area)}">Close</button>` : ""}`;
+    return `<div class="box">${boxHead(`${v.area} - ${v.places} place(s)`, head)}
+      <p class="small muted" style="margin:0 0 10px">${esc(v.reason)}</p>
+      ${v.suggestions.length ? `<table class="t vac-list"><thead><tr><th>Suggested candidate</th><th class="num-col">Score for ${esc(v.area)}</th><th>Skill gaps</th><th>State</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+        : empty(`No CV in the pool scores enough for ${v.area} yet. Add CVs, or check the area's required skills.`)}</div>`;
+  };
+  setView(`<div class="nums four">${nums}</div>
+    <div class="box">${boxHead("Vacancies", `<div class="actions"><button class="btn" data-act="sync-interns">Check MongoDB interns</button><button class="btn primary" data-act="vac-new">Add vacancy</button></div>`)}
+      <div class="filters"><div class="tabs">${VAC_SHOW.map(([k, l]) => `<button class="${UI.vacShow === k ? "on" : ""}" data-act="vac-show" data-s="${k}">${esc(l)}</button>`).join("")}</div></div>
+      <p class="small muted" style="margin:0">A place opens ${esc(r.notice_days)} days before a MongoDB intern's last day. For each vacancy the Planner suggests the strongest CVs for that area, plus ${esc(r.reserves)} reserves. Nobody is contacted until you approve.</p></div>
+    ${r.rows.length ? r.rows.map(card).join("") : `<div class="box">${empty(UI.vacShow === "open" ? "No open vacancies. Click \"Check MongoDB interns\" to run the Planner now." : "Nothing here yet.")}</div>`}`);
+}
+
+function vacancyForm(areas) {
+  openDialog(`<h3>Add vacancy</h3><p class="small muted">For a place the intern records do not show yet, for example when someone leaves early.</p>
+    <div class="form-row"><label for="vf-area">Area</label><select id="vf-area">${areas.map((a) => `<option>${esc(a)}</option>`).join("")}</select></div>
+    <div class="form-row"><label for="vf-places">How many places</label><input type="text" id="vf-places" value="1"></div>
+    <div class="form-row"><label for="vf-date">Open from</label><input type="text" id="vf-date" placeholder="YYYY-MM-DD, or leave empty for today"></div>
+    <div class="form-row"><label for="vf-reason">Reason</label><textarea id="vf-reason" rows="2" style="min-height:50px" placeholder="For example: an intern left early."></textarea></div>
+    <div class="actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-dlg="save">Add vacancy</button></div>`);
+  const d = $("#dialog");
+  d.querySelector('[data-dlg="cancel"]').onclick = closeDialog;
+  d.querySelector('[data-dlg="save"]').onclick = async () => {
+    try {
+      await api("/api/vacancies", { method: "POST", body: { area: $("#vf-area").value, places: $("#vf-places").value,
+        opens_on: $("#vf-date").value, reason: $("#vf-reason").value } });
+      closeDialog(); toast("Vacancy added."); lastHTML = ""; render();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
 function nextStep(c, areas) {
   const areaSelect = (label) => `<select id="area-pick" style="width:auto;max-width:220px">${areas.filter((a) => a.active).map((a) => `<option ${a.name === c.area ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select>
       <button class="btn ${label ? "primary" : "small"}" data-act="set-area">${esc(label || "Use this area")}</button>`;
+  const scoreOf = {};
+  (c.area_scores || []).forEach((x) => { scoreOf[x.area] = x.score; });
+  const inviteSelect = () => `<select id="invite-area" style="width:auto;max-width:260px">${(c.active_areas || []).slice()
+      .sort((a, b) => (scoreOf[b] ?? -1) - (scoreOf[a] ?? -1))
+      .map((a) => `<option value="${esc(a)}" ${a === c.area ? "selected" : ""}>${esc(a)}${scoreOf[a] != null ? " (" + esc(scoreOf[a]) + ")" : ""}</option>`).join("")}</select>
+      <button class="btn primary" data-act="invite">Invite to interview</button>`;
   switch (c.status) {
     case "new": return notice("ok", "The Recruiter will read this CV in a moment.", "The page updates by itself.");
+    case "in_pool": return notice("ok", "Waiting in the pool.", `Best area: ${c.area} (${c.score}/100). Invite this candidate when there is a place.`,
+      `<div class="actions">${inviteSelect()}<button class="btn" data-act="archive">Archive</button></div>`);
+    case "no_area": return notice("ok", "No matching area.",
+      (c.suggested_new_area ? `The AI suggested a new area: "${c.suggested_new_area}". ` : "") + "The CV is rescored when you add or change an area, or you can invite directly.",
+      `<div class="actions">${c.suggested_new_area ? `<a class="btn" href="#/areas/new:${encodeURIComponent(c.suggested_new_area)}">Add "${esc(c.suggested_new_area)}"</a>` : ""}${inviteSelect()}<button class="btn" data-act="archive">Archive</button></div>`);
+    case "archived": return notice("ok", "Archived.", `${c.outcome || "Removed from the pool"}. Restore it to put it back in the pool.`,
+      `<button class="btn" data-act="restore">Restore to pool</button>`);
     case "needs_person": return notice("need", "This CV could not be read.", "It may be a scanned PDF. Upload it again as Word or text, or try again.",
       `<div class="actions"><button class="btn primary" data-act="retry">Try again</button><button class="btn danger" data-act="close">Close</button></div>`);
     case "needs_area": return notice("need", "Choose the area for this candidate.",
@@ -353,16 +563,37 @@ async function pCandidate(appNo) {
   const scoreTable = parts.length ? `<table class="t score-table"><thead><tr><th>Part</th><th>Why</th><th class="num-col">Points</th></tr></thead><tbody>
       ${parts.map(([k, v]) => `<tr><td>${esc(k[0].toUpperCase() + k.slice(1))}</td><td class="small muted">${esc(v.why)}</td><td class="num-col">${esc(v.points)} / ${esc(v.max)}</td></tr>`).join("")}
       <tr class="total"><td>Total</td><td></td><td class="num-col">${esc(c.score)} / 100</td></tr></tbody></table>
-      <div class="small muted" style="margin-top:6px">60 or more: shortlisted. 50 to 59: you decide. Below 50: not shortlisted.</div>` : "";
+      <div class="small muted" style="margin-top:6px">60 or more: strong fit. 50 to 59: borderline. Below 50: weak match.</div>` : "";
   const emailField = UI.editEmail
     ? `<div class="actions"><input type="email" id="email-input" value="${esc(c.email)}" style="max-width:280px"><button class="btn primary small" data-act="save-email">Save</button><button class="btn small" data-act="cancel-email">Cancel</button></div>`
     : `<div>${c.email ? esc(c.email) : `<span class="muted">No email yet</span>`} ${ROLE === "hr" ? `<button class="btn link small" data-act="edit-email">${c.email ? "Change" : "Add email"}</button>` : ""}</div>
        ${c.email_source ? `<div class="small muted">${esc(c.email_source)}</div>` : ""}`;
   const hasInterview = c.interview_label || (c.questions && c.questions.length) || c.result;
-  setView(`<a class="back" href="#/candidates">&larr; All candidates</a>
+  const inPool = ["new", "in_pool", "no_area", "archived"].includes(c.status);
+  if (UI.candidateInPool !== inPool) { UI.candidateInPool = inPool; renderFrame(); }
+  const allScores = (c.area_scores || []).length ? `<details class="field"><summary class="label" style="cursor:pointer">Scores for every area (${c.area_scores.length})</summary>
+      <table class="t"><tbody>${c.area_scores.map((x) => `<tr><td>${esc(x.area)}</td><td class="num-col">${esc(x.score)}</td></tr>`).join("")}</tbody></table></details>` : "";
+  const returningBanner = (c.returning_interns && c.returning_interns.length)
+    ? notice("ok", "Returning TalentHub Intern Match",
+        c.returning_interns.map((m) => `Trainee ID ${m.Trainee_ID} (${m.field_of_spec_name}, ended ${fmtDate(m.Training_EndDate)}${m.Institute ? ", " + m.Institute : ""})`).join("; "))
+    : "";
+  const doneCount = (c.checklist || []).filter((x) => x.done).length;
+  const checklistHtml = c.checklist.length
+    ? `<ul class="chk-list">${c.checklist.map((item, idx) => `<li><label class="${item.done ? "done" : ""}"><input type="checkbox" ${item.done ? "checked" : ""} ${ROLE === "hr" ? `data-act="toggle-chk" data-i="${idx}"` : "disabled"}><span>${esc(item.item)}</span></label></li>`).join("")}</ul>`
+    : `<span class="muted">Being prepared</span>`;
+  const alreadyIntern = (c.returning_interns || []).some((m) => String(m.Trainee_ID) === String(c.work_id));
+  const enrollBtn = (ROLE === "hr" && c.work_id && c.sample_mongo_available && c.area)
+    ? `<div class="actions" style="margin-top:12px"><button class="btn small ${alreadyIntern ? "" : "primary"}" data-act="enroll-intern">${alreadyIntern ? "Synced to Sample MongoDB Interns" : "Add to Sample Interns (MongoDB)"}</button></div>`
+    : "";
+  const hrNotesHtml = `<div class="box">${boxHead("Team notes", `<span class="small muted">${(c.hr_notes || []).length}</span>`)}
+      ${(c.hr_notes || []).length ? `<table class="t" style="margin-bottom:10px"><tbody>${c.hr_notes.slice().reverse().map((n) => `<tr><td>${esc(n.text)}<div class="small muted">${esc(n.by)} - ${esc(fmtTime(n.at))}</div></td></tr>`).join("")}</tbody></table>` : `<p class="small muted" style="margin:0 0 10px">No notes yet.</p>`}
+      <div class="actions"><input type="text" id="cand-note-in" style="flex:1" placeholder="Add a note saved to SQLite database"><button type="button" class="btn small" data-act="add-note">Save note</button></div></div>`;
+
+  setView(`${inPool ? `<a class="back" href="#/pool">&larr; Pool</a>` : `<a class="back" href="#/candidates">&larr; All candidates</a>`}
     <div class="box"><div class="box-head"><h2 style="font-size:18px">${esc(c.name)}</h2><div class="spacer"></div>
       <a class="btn" href="/api/candidates/${encodeURIComponent(c.app_no)}/cv">Download CV</a></div>
       <div class="actions">${esc(c.app_no)} ${statusTag(c)}${c.area ? ` <span>Area: ${esc(c.area)}</span>` : ""}${c.score != null ? ` <span>Score: ${esc(c.score)}/100</span>` : ""}${c.work_id ? ` <b>Work ID ${esc(c.work_id)}</b>` : ""}</div></div>
+    ${returningBanner}
     ${ROLE === "hr" ? nextStep(c, areas.areas) : notice("ok", "You are viewing this as the Interviewer.", "Open it from the Interviews page to enter a result.")}
     ${flags.length ? `<div class="box">${boxHead("Notes to check", `<span class="small muted">From the AI team</span>`)}<table class="t"><tbody>
       ${flags.map((f) => `<tr><td>${esc(f.text)}<div class="small muted">${esc(f.by)} - ${esc(fmtTime(f.at))}</div></td>
@@ -382,17 +613,19 @@ async function pCandidate(appNo) {
         ${c.area_reasons.length ? `<div class="field"><div class="label">Why</div>${list(c.area_reasons, "")}</div>` : ""}
         ${c.area_evidence.length ? `<div class="field"><div class="label">Evidence from the CV</div>${c.area_evidence.map((e) => `<div class="quote">"${esc(e)}"</div>`).join("")}</div>` : ""}
         ${c.score != null ? `<div class="field"><div class="label">Score (calculated by code)</div>${scoreTable}</div>` : ""}
-        ${c.gaps.length ? `<div class="field"><div class="label">Skill gaps</div>${esc(c.gaps.join(", "))}</div>` : ""}</div>
+        ${c.gaps.length ? `<div class="field"><div class="label">Skill gaps</div>${esc(c.gaps.join(", "))}</div>` : ""}
+        ${allScores}</div>
     </div>
     ${hasInterview ? `<div class="box">${boxHead("Interview", c.questions_source ? byText(c.questions_source === "AI" ? "questions by AI" : c.questions_source) : "")}
       <div class="grid two"><div><div class="field"><div class="label">Date and time</div><div>${esc(c.interview_label || "-")}</div></div>
         <div class="field"><div class="label">Result</div><div>${c.result ? `${resultTag(c.result)} <span class="small muted">${esc(fmtTime(c.result_at))} - decided by the interviewer</span>` : `<span class="muted">Not entered yet</span>`}</div></div>
         ${c.result_comment ? `<div class="field"><div class="label">Interviewer's comment</div><div>${esc(c.result_comment)}</div></div>` : ""}</div>
         <div><div class="label">Questions for the interviewer</div>${c.questions.length ? `<ol class="clean">${c.questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>` : `<span class="muted">-</span>`}</div></div></div>` : ""}
-    ${c.drafts.length ? `<div class="box" id="emails">${boxHead("Emails", `<span class="small muted">Nothing is sent without your release</span>`)}${c.drafts.slice().reverse().map((d) => mailBlock(d)).join("")}</div>` : ""}
-    ${c.work_id ? `<div class="box">${boxHead("Onboarding")}
-      <div class="grid two"><div><div class="label">Work ID</div><div class="big">${esc(c.work_id)}</div><div class="small muted">Issued by plain code after the Pass. Never reused.</div></div>
-      <div><div class="label">Onboarding checklist</div>${c.checklist.length ? `<ul class="clean">${c.checklist.map((i) => `<li>${esc(i.item)}</li>`).join("")}</ul>` : `<span class="muted">Being prepared</span>`}</div></div></div>` : ""}
+    ${c.drafts.length ? `<div class="box" id="emails">${boxHead("Emails", `<button class="btn small" data-act="email-settings">Email settings</button>`)}${c.drafts.slice().reverse().map((d) => mailBlock(d)).join("")}</div>` : ""}
+    ${c.work_id ? `<div class="box">${boxHead("Onboarding", c.checklist.length ? `<span class="small muted">${doneCount} of ${c.checklist.length} done</span>` : "")}
+      <div class="grid two"><div><div class="label">Work ID</div><div class="big">${esc(c.work_id)}</div><div class="small muted">Issued by plain code after the Pass. Never reused.</div>${enrollBtn}</div>
+      <div><div class="label">Onboarding checklist</div>${checklistHtml}</div></div></div>` : ""}
+    ${hrNotesHtml}
     <div class="box">${boxHead("Timeline", `<button class="btn small" data-act="toggle-runs">${UI.showRuns ? "Hide" : "Show"} AI steps</button>`)}
       <table class="t"><thead><tr><th style="width:120px">Time</th><th style="width:170px">Who</th><th>What</th></tr></thead><tbody>
       ${c.events.slice().reverse().map((e) => `<tr><td class="small muted">${esc(fmtTime(e.at))}</td><td>${actorText(e.actor)}</td><td>${esc(e.text)}</td></tr>`).join("")}</tbody></table>
@@ -430,10 +663,15 @@ async function pReview() {
 async function pReplies(arg) {
   title("Replies");
   if (arg === "released" || arg === "waiting") UI.repliesTab = arg;
-  const drafts = await api(`/api/drafts?state=${UI.repliesTab}`);
-  setView(`<div class="box">${boxHead("Emails drafted by the AI team")}
+  const [drafts, cfg] = await Promise.all([api(`/api/drafts?state=${UI.repliesTab}`), api("/api/email/settings")]);
+  const modeMsg = cfg.enabled
+    ? (cfg.test_recipient
+        ? `Live SMTP is ON (Demo Override redirecting all emails to ${cfg.test_recipient}).`
+        : `Live SMTP is ON via ${cfg.host}:${cfg.port}.`)
+    : "Outbox archive mode is ON. Enable Live SMTP in Email settings to send real emails.";
+  setView(`<div class="box">${boxHead("Emails drafted by the AI team", `<button class="btn small" data-act="email-settings">Email settings &amp; test</button>`)}
     <div class="filters"><div class="tabs"><button class="${UI.repliesTab === "waiting" ? "on" : ""}" data-act="tab" data-t="waiting">Waiting for release</button><button class="${UI.repliesTab === "released" ? "on" : ""}" data-act="tab" data-t="released">Released</button></div></div>
-    <p class="small muted" style="margin-top:0">Read each email, edit it if needed, then release it. In this prototype a released email is saved in the data/outbox folder. Nothing is sent.</p>
+    <p class="small muted" style="margin-top:0">${esc(modeMsg)} Every released email is also saved in <code>data/outbox/</code>.</p>
     ${drafts.length ? drafts.map((d) => mailBlock(d, { showCandidate: true })).join("") : empty(UI.repliesTab === "waiting" ? "No emails are waiting for release." : "No emails released yet.")}</div>`);
 }
 
@@ -479,7 +717,7 @@ async function pTeam() {
   title("AI team");
   const t = await api("/api/team");
   const down = !t.model.ok || (t.notice && t.notice.text);
-  setView(`${notice(down ? "error" : "ok", down ? "The model server is not running, so the AI team is waiting." : t.paused ? "The AI team is paused." : "Four AI employees work on their own schedule.",
+  setView(`${notice(down ? "error" : "ok", down ? "The model server is not running, so the AI team is waiting." : t.paused ? "The AI team is paused." : `${t.employees.length} AI employees work on their own schedule.`,
       "Each one is a folder of Markdown files (ROLE, SCHEDULE, RELEASES and one SKILL file per routine). The status of a candidate hands the work from one to the next.",
       ROLE === "hr" ? `<div class="actions"><button class="btn primary" data-act="run" data-who="all">Run all now</button><button class="btn" data-act="pause" data-p="${t.paused ? "0" : "1"}">${t.paused ? "Resume" : "Pause"}</button></div>` : "")}
     <div class="grid two">${t.employees.map((e) => `<div class="box emp">
@@ -514,10 +752,12 @@ function internPhase(r) {
 function filteredInterns(rows) {
   const q = UI.internQuery.trim().toLowerCase();
   const out = rows.filter((r) => {
-    if (UI.internFilter !== "all" && internPhase(r).key !== UI.internFilter) return false;
+    if (UI.internFilter === "soon") { if (!r.ending_soon) return false; }
+    else if (UI.internFilter === "unknown") { if (r.area) return false; }
+    else if (UI.internFilter !== "all" && internPhase(r).key !== UI.internFilter) return false;
     if (UI.internSpec && r.field_of_spec_name !== UI.internSpec) return false;
     if (q) {
-      const hay = [r.Trainee_ID, r.Trainee_Name, r.field_of_spec_name, r.Trainee_Email, r.Institute].join(" ").toLowerCase();
+      const hay = [r.Trainee_ID, r.Trainee_Name, r.field_of_spec_name, r.area, r.Trainee_Email, r.Institute].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -583,17 +823,20 @@ function renderInternTable(rows) {
     ${sortHeader("Training_StartDate", "Start Date (UTC)")}
     ${sortHeader("Training_EndDate", "End Date (UTC)")}
     ${sortHeader("field_of_spec_name", "Specialization")}
+    <th>Mapped Area</th>
     <th>Cohort</th><th></th></tr></thead><tbody>
     ${pageRows.map((r) => {
       const ph = internPhase(r);
       const meta = [r.Trainee_Email, r.Institute].filter(Boolean).join(" · ");
+      const cohortTag = r.ending_soon ? tag("Ending soon", "need") : tag(ph.label, ph.cls);
       return `<tr class="click" data-act="intern-detail" data-id="${esc(r.Trainee_ID)}">
         <td><b class="mono">${esc(r.Trainee_ID)}</b></td>
         <td>${esc(r.Trainee_Name)}${meta ? `<div class="small muted">${esc(meta)}</div>` : ""}</td>
         <td>${esc(fmtDate(r.Training_StartDate))}<div class="small muted mono">${esc(r.Training_StartDate)}</div></td>
         <td>${esc(fmtDate(r.Training_EndDate))}<div class="small muted mono">${esc(r.Training_EndDate)}</div></td>
         <td>${tag(r.field_of_spec_name)}</td>
-        <td>${tag(ph.label, ph.cls)}</td>
+        <td>${r.area ? esc(r.area) : tag("Unmapped", "need")}</td>
+        <td>${cohortTag}</td>
         <td style="text-align:right"><button type="button" class="btn small" data-act="intern-detail" data-id="${esc(r.Trainee_ID)}">View</button></td>
       </tr>`;
     }).join("")}</tbody></table>
@@ -647,27 +890,35 @@ async function pInterns() {
   if (sRes.status === "fulfilled") { STATE = sRes.value; renderFrame(); }
   if (iRes.status === "fulfilled") {
     UI.interns = iRes.value.interns || [];
+    UI.internStats = iRes.value.stats || null;
   } else {
     UI.interns = [];
+    UI.internStats = null;
     UI.internsError = iRes.reason?.message || "Could not load interns from TalentHub.";
   }
 
   const rows = UI.interns;
+  const st = UI.internStats || {};
   const th = STATE?.talent_hub;
   const banner = UI.internsError
     ? notice("error", "TalentHub API is not reachable.", UI.internsError + " Run ./start_talent_hub.sh in another terminal.", `<button type="button" class="btn small" data-act="intern-refresh">Retry</button>`)
-    : notice("ok", "Connected to SLT TalentHub (MongoDB sample).", `${rows.length} intern record(s) loaded from ${th?.url || "TalentHub API"}.`, `<button type="button" class="btn small" data-act="intern-refresh">Refresh</button>`);
+    : notice("ok", "Connected to SLT TalentHub (MongoDB).", `${rows.length} intern record(s) loaded live from ${th?.url || "TalentHub API"} (no duplicate SQLite copy).`,
+      `<div class="actions"><button type="button" class="btn small primary" data-act="sync-interns">Check Vacancies (Planner)</button><button type="button" class="btn small" data-act="intern-refresh">Refresh</button></div>`);
 
   const specCounts = {};
   rows.forEach((r) => { if (r.field_of_spec_name) specCounts[r.field_of_spec_name] = (specCounts[r.field_of_spec_name] || 0) + 1; });
   const specs = Object.keys(specCounts).sort();
   const topSpecs = Object.entries(specCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8);
   if (UI.internSpec && !specs.includes(UI.internSpec)) UI.internSpec = "";
-  const activeCount = rows.filter((r) => internPhase(r).key === "active").length;
+  const activeCount = st.active ?? rows.filter((r) => internPhase(r).key === "active").length;
+  const soonCount = st.ending_soon ?? rows.filter((r) => r.ending_soon).length;
+  const unknownCount = st.unknown_area ?? rows.filter((r) => !r.area).length;
   const stats = `
     <div class="intern-stats">
-      <div class="intern-stat"><b>${esc(rows.length)}</b><span>Total interns</span></div>
-      <div class="intern-stat"><b>${esc(activeCount)}</b><span>Active today (UTC)</span></div>
+      <div class="intern-stat"><b>${esc(rows.length)}</b><span>Total in MongoDB</span></div>
+      <div class="intern-stat"><b>${esc(activeCount)}</b><span>Active today</span></div>
+      <div class="intern-stat"><b>${esc(soonCount)}</b><span>Ending in 7 days</span></div>
+      <div class="intern-stat"><b>${esc(unknownCount)}</b><span>Unmapped area</span></div>
       <div class="intern-stat"><b>${esc(specs.length)}</b><span>Specializations</span></div>
     </div>`;
 
@@ -676,9 +927,20 @@ async function pInterns() {
     ${topSpecs.map(([sp, cnt]) => `<button type="button" class="spec-chip ${UI.internSpec === sp ? "on" : ""}" data-act="intern-chip" data-spec="${esc(sp)}">${esc(sp)} (${esc(cnt)})</button>`).join("")}
   </div>` : "";
 
-  const tabs = [["all", "All"], ["active", "Active"], ["completed", "Completed"], ["upcoming", "Upcoming"]];
+  const tabs = [["all", "All"], ["active", "Active"], ["soon", "Ending soon"], ["completed", "Completed"], ["upcoming", "Upcoming"], ["unknown", "Unmapped"]];
+  const barChart = (items, total) => {
+    const max = Math.max(1, ...(items || []).map((x) => x.count));
+    return (items || []).slice(0, 8).map((x) => `<div class="bar-row"><span title="${esc(x.name)}">${esc(x.name.slice(0, 26))}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.round((x.count / max) * 100)}%"></div></div>
+      <span class="mono" style="text-align:right">${esc(x.count)}</span></div>`).join("");
+  };
+  const analyticsBox = st.by_specialization ? `<div class="grid two">
+      <div class="box">${boxHead("Top Specializations (MongoDB)")}${barChart(st.by_specialization, rows.length)}</div>
+      <div class="box">${boxHead("Top Institutes (MongoDB)")}${barChart(st.by_institute, rows.length)}</div>
+    </div>` : "";
+
   setView(`${banner}${stats}
-    <div class="box">${boxHead("Intern records", `<span class="small muted" id="intern-shown"></span><button type="button" class="btn small" data-act="intern-csv" ${rows.length ? "" : "disabled"}>Export CSV</button>`)}
+    <div class="box">${boxHead("Intern records (MongoDB)", `<span class="small muted" id="intern-shown"></span><button type="button" class="btn small" data-act="intern-csv" ${rows.length ? "" : "disabled"}>Export CSV</button>`)}
       ${specChips}
       <div class="filters">
         <div class="tabs">${tabs.map(([k, l]) => `<button type="button" class="${UI.internFilter === k ? "on" : ""}" data-act="intern-filter" data-f="${k}">${esc(l)}</button>`).join("")}</div>
@@ -686,10 +948,11 @@ async function pInterns() {
           <option value="">All specializations</option>
           ${specs.map((sp) => `<option value="${esc(sp)}" ${UI.internSpec === sp ? "selected" : ""}>${esc(sp)} (${esc(specCounts[sp])})</option>`).join("")}
         </select>
-        <input type="search" class="search" id="intern-q" placeholder="Search ID, name, specialization" value="${esc(UI.internQuery)}">
+        <input type="search" class="search" id="intern-q" placeholder="Search ID, name, institute, email" value="${esc(UI.internQuery)}">
       </div>
       <div id="intern-table-wrap"></div>
-    </div>`);
+    </div>
+    ${analyticsBox}`);
 
   renderInternTable(rows);
   $("#intern-spec").onchange = (e) => { UI.internSpec = e.target.value; UI.internPage = 1; syncSpecChips(); renderInternTable(rows); };
@@ -776,9 +1039,50 @@ const ACTS = {
   },
   "samples": () => act(async () => { const r = await api("/api/samples", { method: "POST" }); UI.uploadResults = r.results; return r; },
     (r) => `${r.results.filter((x) => x.ok).length} sample CV(s) added.`),
-  "filter": (b) => { UI.candFilter = b.dataset.f; history.replaceState(null, "", "#/candidates"); lastHTML = ""; pCandidates(); },
+  "filter": (b) => { UI.candFilter = b.dataset.f; history.replaceState(null, "", "#/candidates"); current.arg = ""; lastHTML = ""; pCandidates(); },
   "show-all": (b) => { UI.showAll = b.dataset.k; lastHTML = ""; render(); },
   "tab": (b) => { UI.repliesTab = b.dataset.t; lastHTML = ""; pReplies(); },
+  "vac-show": (b) => { UI.vacShow = b.dataset.s; history.replaceState(null, "", "#/vacancies"); current.arg = ""; lastHTML = ""; pVacancies(); },
+  "vac-new": async () => { const a = await api("/api/areas"); vacancyForm(a.areas.filter((x) => x.active).map((x) => x.name)); },
+  "vac-approve": async (b) => {
+    if (!(await confirmBox({ heading: `Approve ${b.dataset.n} for ${b.dataset.area}?`, text: "The candidate leaves the pool. The Coordinator books an interview and drafts the invitation for you to release.", ok: "Approve" }))) return;
+    act(() => api(`/api/vacancies/${b.dataset.v}/approve`, { method: "POST", body: { app_no: b.dataset.a } }), (r) => `${b.dataset.n} approved for ${r.area} (score ${r.score}).`);
+  },
+  "vac-decline": async (b) => {
+    if (!(await confirmBox({ heading: `Pass over ${b.dataset.n}?`, text: "The next best CV from the pool is suggested instead. The candidate stays in the pool for other areas.", ok: "Not this one" }))) return;
+    act(() => api(`/api/vacancies/${b.dataset.v}/decline`, { method: "POST", body: { app_no: b.dataset.a } }), "Suggestion passed over.");
+  },
+  "vac-close": async (b) => {
+    if (!(await confirmBox({ heading: `Close the ${b.dataset.area} vacancy?`, text: "It stops being suggested for. Candidates already invited keep their interviews.", ok: "Close vacancy", danger: true }))) return;
+    act(() => api(`/api/vacancies/${b.dataset.v}/close`, { method: "POST" }), "Vacancy closed.");
+  },
+  "sync-interns": (b) => { b.disabled = true; act(() => api("/api/vacancies/plan", { method: "POST" }),
+    (r) => `Planner checked ${r.read ?? 0} MongoDB intern(s): ${r.ending_soon ?? 0} ending soon, ${r.created ?? 0} new vacancy(ies), ${r.open ?? 0} open.`); },
+  "pool-show": (b) => { UI.poolShow = b.dataset.s; history.replaceState(null, "", "#/pool"); current.arg = ""; lastHTML = ""; pPool(); },
+  "invite": async () => {
+    const area = $("#invite-area").value;
+    if (!(await confirmBox({ heading: `Invite to interview for ${area}?`, text: "The candidate leaves the pool. The Coordinator books an interview slot and drafts the invitation for you to release.", ok: "Invite" }))) return;
+    act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/invite`, { method: "POST", body: { area } }), (r) => `Invited for ${r.area} (score ${r.score}). The Coordinator takes it from here.`);
+  },
+  "archive": async () => {
+    if (!(await confirmBox({ heading: "Archive this CV?", text: "It is removed from the pool but not deleted. You can restore it from Pool > Archived.", ok: "Archive" }))) return;
+    act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/archive`, { method: "POST" }), "Archived.");
+  },
+  "restore": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/restore`, { method: "POST" }), "Restored. The Recruiter reads it again."),
+  "email-settings": () => openEmailSettings(),
+  "resend-draft": (b) => act(async () => {
+    const r = await api(`/api/drafts/${b.dataset.id}/resend`, { method: "POST" });
+    if (!r.ok) throw new Error(r.error || "SMTP delivery failed.");
+    return r;
+  }, (r) => `Email sent via SMTP to ${r.sent_to}.`),
+  "toggle-chk": (b) => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/checklist/${b.dataset.i}`, { method: "POST", body: { done: b.checked } }), "Checklist updated."),
+  "add-note": () => {
+    const el = $("#cand-note-in");
+    if (!el || !el.value.trim()) { toast("Write a note first.", true); return; }
+    act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/notes`, { method: "POST", body: { text: el.value } }), "Note saved.");
+  },
+  "enroll-intern": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/enroll-intern`, { method: "POST", body: { months: 6 } }),
+    (r) => `Saved Trainee ID ${r.intern?.Trainee_ID || ""} to local sample MongoDB interns.`),
   "toggle-cv": () => { UI.showCv = !UI.showCv; lastHTML = ""; render(); },
   "toggle-runs": () => { UI.showRuns = !UI.showRuns; lastHTML = ""; render(); },
   "edit-email": () => { UI.editEmail = true; lastHTML = ""; render().then(() => $("#email-input")?.focus()); },
@@ -811,8 +1115,13 @@ const ACTS = {
     lastHTML = ""; render();
   },
   "release": async (b) => {
-    if (!(await confirmBox({ heading: `Release the ${b.dataset.kind}?`, text: `To ${b.dataset.name}. In this prototype the email is saved to the outbox folder, not sent.`, ok: "Release" }))) return;
-    act(() => api(`/api/drafts/${b.dataset.id}/release`, { method: "POST" }), "Released.");
+    const em = STATE?.email || {};
+    const info = em.enabled
+      ? (em.test_recipient ? `Email will be archived AND sent via SMTP (Demo redirect -> ${em.test_recipient}).` : `Email will be archived AND emailed live via SMTP to ${b.dataset.name}.`)
+      : `In Outbox mode, the email is archived to data/outbox/.`;
+    if (!(await confirmBox({ heading: `Release the ${b.dataset.kind}?`, text: `To ${b.dataset.name}. ${info}`, ok: "Release" }))) return;
+    act(() => api(`/api/drafts/${b.dataset.id}/release`, { method: "POST" }),
+      (r) => r.delivery_status === "sent" ? `Released and emailed to ${r.sent_to}.` : r.delivery_status === "failed" ? `Released to outbox (SMTP failed: ${r.delivery_error}).` : "Released to outbox.");
   },
   "jump": (b, e) => { e.preventDefault(); $("#emails")?.scrollIntoView({ behavior: "smooth" }); },
   "area-new": (b) => areaForm(null, b.dataset.name || ""),
@@ -867,10 +1176,10 @@ view.addEventListener("click", (e) => {
 
 // ================================================================ router
 const ROUTES = {
-  hr: { dashboard: pDashboard, add: pAdd, candidates: pCandidates, candidate: pCandidate, review: pReview, replies: pReplies, areas: pAreas, team: pTeam, interns: pInterns },
+  hr: { dashboard: pDashboard, add: pAdd, pool: pPool, vacancies: pVacancies, candidates: pCandidates, candidate: pCandidate, review: pReview, replies: pReplies, areas: pAreas, team: pTeam, interns: pInterns },
   interviewer: { interviews: pInterviews, interview: pInterview, team: pTeam, candidate: pCandidate },
 };
-const AUTO = new Set(["dashboard", "candidates", "candidate", "review", "replies", "team", "interviews", "interview"]);
+const AUTO = new Set(["dashboard", "pool", "vacancies", "candidates", "candidate", "review", "replies", "team", "interviews", "interview"]);
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, "");
   const i = h.indexOf("/");

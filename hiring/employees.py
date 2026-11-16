@@ -24,6 +24,7 @@ EMPLOYEES = {
     "coordinator": "Coordinator",
     "onboarding": "Onboarding",
     "chief-of-staff": "Chief of staff",
+    "planner": "Planner",
 }
 
 
@@ -59,11 +60,12 @@ def routines(key: str) -> list[dict]:
     if not base.exists():
         return out
     order = {
-        "recruiter": ["parse-cv", "duplicate-check", "choose-area", "score-match", "skill-gap", "shortlist"],
+        "recruiter": ["parse-cv", "duplicate-check", "choose-area", "score-match", "skill-gap", "add-to-pool"],
         "coordinator": ["invite-and-slots", "prepare-questions", "reply-not-shortlisted", "update-register",
                         "reply-failed-or-hold"],
         "onboarding": ["issue-work-id", "draft-acceptance", "induction-checklist"],
-        "chief-of-staff": ["read-run-logs", "flag-stalled", "morning-brief"],
+        "chief-of-staff": ["read-run-logs", "archive-old-cvs", "flag-stalled", "morning-brief"],
+        "planner": ["sync-interns", "find-vacancies", "suggest-candidates"],
     }.get(key, [])
     names = sorted([p.name for p in base.iterdir() if (p / "SKILL.md").exists()],
                    key=lambda n: order.index(n) if n in order else 99)

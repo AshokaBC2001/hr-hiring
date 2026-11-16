@@ -3,6 +3,7 @@
     .venv/bin/python run.py check        is the model server running, and does it answer in JSON?
     .venv/bin/python run.py samples      add the sample CVs
     .venv/bin/python run.py once         let the Recruiter, Coordinator and Onboarding work once
+    .venv/bin/python run.py plan         let the Planner read MongoDB interns and open vacancies
     .venv/bin/python run.py brief        let the Chief of staff write the morning brief
     .venv/bin/python run.py status       list the candidates and their status
 """
@@ -42,7 +43,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="HR Hiring helpers")
     ap.add_argument(
         "command",
-        choices=["check", "samples", "once", "brief", "status", "seed-talent-hub", "interns"],
+        choices=["check", "samples", "once", "plan", "brief", "status", "seed-talent-hub", "interns"],
     )
     a = ap.parse_args()
     if a.command == "check":
@@ -78,6 +79,8 @@ def main() -> int:
             print(r)
         if flows.NOTICE["text"]:
             print("Stopped:", flows.NOTICE["text"])
+    elif a.command == "plan":
+        print(flows.run_planner())
     elif a.command == "brief":
         print(flows.run_chief())
         with db.Session() as s:

@@ -1,28 +1,30 @@
 # HR Hiring
 
-A local, AI-assisted hiring workflow. Four AI agents handle the routine work of screening CVs, scheduling interviews and drafting emails. Two people make every decision that matters.
+A local, AI-assisted hiring workflow. Five AI agents handle the routine work of screening CVs, monitoring intern vacancies, scheduling interviews and drafting emails. Two people make every decision that matters.
 
 | Role | Type | Responsibility |
 |---|---|---|
-| **Recruiter** | AI agent | Reads each CV, builds a profile checked against the CV, picks the role area and scores the match. |
+| **Recruiter** | AI agent | Reads each CV, builds a profile checked against the CV, scores the match across areas and places candidates in the CV Pool. |
+| **Planner** | AI agent | Monitors active interns in TalentHub (MongoDB), opens vacancies when placements end within 7 days and ranks top CV Pool matches. |
 | **Coordinator** | AI agent | Books interview slots, prepares interview questions and drafts emails to candidates. |
-| **Onboarding** | AI agent | After a Pass, issues a 4-digit employee ID, drafts the offer email and prepares an onboarding checklist. |
-| **Chief of staff** | AI agent | Reviews the day's activity each morning, flags stalled work and writes a short summary. |
-| **HR officer** | Person | Adds CVs, decides borderline and low scores, confirms uncertain areas, manages areas and releases every email. |
+| **Onboarding** | AI agent | After a Pass, issues a 4-digit employee ID, drafts the offer email and prepares an interactive onboarding checklist. |
+| **Chief of staff** | AI agent | Reviews the day's activity each morning, flags stalled work, archives Pool CVs older than 6 months and writes a short summary. |
+| **HR officer** | Person | Adds CVs, invites from the CV Pool, approves vacancy suggestions, manages areas, configures SMTP email and releases every email. |
 | **Interviewer** | Person | Runs the interview and records Pass, Fail or Hold. The AI cannot change this result. |
 
 ## Features
 
-- Runs fully on your own machine. CVs never leave the computer.
+- Runs fully on your own machine. CVs never leave the computer unless live SMTP delivery is explicitly enabled.
 - Local LLM (Gemma 3 4B by default) served by llama.cpp. No cloud API keys needed.
 - Scores are calculated by code, not by the model.
 - Every model answer is checked against the CV before it is saved.
-- Emails are drafted only. Nothing is sent. Released emails are saved to `data/outbox/`.
+- Emails are always archived in `data/outbox/`, with optional **Live SMTP delivery** (HTML + plain text, per-draft delivery status, retry, and a safe **Demo Recipient Override**).
+- Unified dual database: **SQLite** (`data/register.db`) for hiring pipeline, CV Pool, vacancies, interactive checklists, HR notes and settings; **MongoDB** (`slt_talent_hub_sample.interns`) / TalentHub API as the single source of truth for intern records (no duplicate SQLite intern mirror table), with analytics, returning-intern detection, sample intern enrollment, and CSV/JSON exports.
 - Plain web UI with two roles: HR officer and interviewer.
 
 ## Tech stack
 
-Python, FastAPI, LangGraph, SQLAlchemy (SQLite), APScheduler, llama.cpp, and plain HTML, CSS and JavaScript.
+Python, FastAPI, LangGraph, SQLAlchemy (SQLite), PyMongo (MongoDB), APScheduler, `smtplib` (live SMTP), llama.cpp, and plain HTML, CSS and JavaScript.
 
 ## Requirements
 
@@ -72,22 +74,23 @@ If you see "permission denied", run `bash start_model.sh` and `bash start_app.sh
 ## Quick demo
 
 1. Use the **Role** dropdown (top right) to choose **HR Officer**. Go to **Add CV** and click **Load the sample CVs**.
-2. Watch the **Dashboard** while the Recruiter screens the CVs and the Coordinator drafts invitations. With a local 4B model this can take a minute or more per CV.
-3. Open the **Review queue** to handle borderline scores and CVs whose area is uncertain. If the AI suggests a new area, add it on the **Areas** page with its required skills, then choose it on the candidate's page.
-4. Open **Replies** and release an interview invitation.
+2. Watch the **Dashboard** while the Recruiter screens the CVs, scores them across areas and places qualified CVs into the **CV Pool**.
+3. Open **Interns** or **Vacancies** and click **Run Planner** to inspect the 400 MongoDB TalentHub interns, spot placements ending within 7 days and rank CV Pool suggestions. Approve a suggestion or manually invite a candidate from **CV Pool**.
+4. Open **Replies**, optionally configure **Email Settings** (including **Demo Recipient Override** to route test sends to your own inbox safely) and release an interview invitation.
 5. Switch the role to **Interviewer**, open **Interviews**, pick a candidate and record **Pass**.
-6. Switch back to **HR Officer**. Onboarding issues employee ID **1001** and drafts the offer email. Release it to close the application.
-7. Click **Write brief now** on the Dashboard to see the daily summary. The **AI team** page shows each agent, its routines and every step it took.
+6. Switch back to **HR Officer**. Onboarding issues employee ID **1001**, drafts the offer email and creates an interactive onboarding checklist. Release it to close the application (and optionally click **Enroll in MongoDB (Sample)** on closed hires in local sample mode).
+7. Click **Write brief now** on the Dashboard to see the daily summary. The **AI team** page shows all five agents, their routines and every step taken.
 
 ## How it works
 
 ```
 HR officer adds a CV
-  -> Recruiter:    read CV -> duplicate check -> choose area -> score -> skill gaps -> shortlist rule
-       60+ shortlisted | 50-59 HR officer decides | below 50 HR officer confirms | unsure area -> HR officer
-  -> Coordinator:  interview slot -> questions -> invitation draft    -> HR officer releases
+  -> Recruiter:    read CV -> duplicate check -> score all areas -> CV Pool (or HR review if below threshold / unsure area)
+  -> Planner:      check TalentHub MongoDB interns -> open vacancy if ending within 7 days -> rank Pool candidates -> HR officer approves
+     (or HR officer invites directly from CV Pool)
+  -> Coordinator:  interview slot -> questions -> invitation draft    -> HR officer releases (+ optional live SMTP)
   -> Interviewer:  Pass / Fail / Hold
-  -> Pass: Onboarding: employee ID -> offer draft -> checklist        -> HR officer releases -> Closed
+  -> Pass: Onboarding: employee ID -> offer draft -> interactive checklist -> HR officer releases -> Closed (optional MongoDB sample enroll)
      Fail: Coordinator: rejection draft                               -> HR officer releases -> Closed
      Hold: Coordinator: hold note -> HR officer releases -> On hold   -> Interviewer decides later
 ```
@@ -115,12 +118,13 @@ HR officer adds a CV
 | Model | The model name in `start_model.sh` (any GGUF model on Hugging Face, for example a Qwen3 4B Instruct build) |
 | App port | `APP_PORT` in `hiring/config.py` |
 | TalentHub API & sample MongoDB | `TALENT_HUB_*` env vars / `hiring/config.py` |
+| Live SMTP email delivery | `SMTP_*` env vars / `hiring/config.py` or **Email Settings** in the UI |
 
 To reset all data, stop the app and delete the `data` folder.
 
 ## TalentHub Sample MongoDB & Read-Only API
 
-Until access to the live **SLT TalentHub** API is configured, this branch provides a sample MongoDB database (`slt_talent_hub_sample.interns`) matching TalentHub's schema (`Trainee_ID`, `Trainee_Name`, `Training_StartDate`, `Training_EndDate`, `field_of_spec_name`) and a local Bearer-authenticated read-only mock API (`http://127.0.0.1:5050/api`, avoiding macOS AirPlay's default port `5000`).
+Until access to the live **SLT TalentHub** API is configured, this branch provides a sample MongoDB database (`slt_talent_hub_sample.interns`) matching TalentHub's schema (`Trainee_ID`, `Trainee_Name`, `Training_StartDate`, `Training_EndDate`, `field_of_spec_name`) enriched with Sri Lankan `Institute`, `Trainee_Email` and rolling `ending_soon` cohorts, alongside a local Bearer-authenticated read-only mock API (`http://127.0.0.1:5050/api`, avoiding macOS AirPlay's default port `5000`). **Planner** reads intern placement end dates directly from `hiring/talent_hub.py` rather than mirroring interns in SQLite.
 
 1. Ensure MongoDB is running locally on `127.0.0.1:27017` and seed 400 Sri Lankan IT-focused sample intern records:
 
@@ -147,12 +151,13 @@ To switch to the real TalentHub service later, set `TALENT_HUB_API_URL` (e.g. `h
 ```
 setup.sh, start_model.sh, start_app.sh, start_talent_hub.sh   setup and start scripts
 app.py                                   web app entry point
-run.py                                   CLI helpers: check, samples, once, brief, status, seed-talent-hub, interns
-employees/                               the 4 AI agents (Markdown)
+run.py                                   CLI helpers: check, samples, once, plan, brief, status, seed-talent-hub, interns
+employees/                               the 5 AI agents (Markdown)
 shared/areas.json                        starter areas
 hiring/
   config.py     settings               db.py              database (SQLite)
   llm.py        llama-server client    checks.py          checks on model answers
+  mailer.py     live SMTP sender       vacancies.py       MongoDB-backed vacancy planning
   talent_hub.py TalentHub API & Mongo  talent_hub_mock.py local TalentHub mock API
   tools.py      CV reading, scoring, scheduling, templates
   employees.py  loads agent folders, checked model calls

@@ -176,6 +176,25 @@ def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[
     return total, parts, gaps
 
 
+def score_all_areas(profile: dict, cv_text: str, areas: list) -> dict:
+    """Scores the CV against every active area. Returns {area name: {score, parts, gaps}}."""
+    out = {}
+    for a in areas:
+        total, parts, gaps = score_cv(profile, cv_text, a)
+        if total is not None:
+            out[a.name] = {"score": total, "parts": parts, "gaps": gaps}
+    return out
+
+
+def top_areas(area_scores: dict, skip: tuple = (), n: int | None = None) -> list[tuple[str, int]]:
+    """Return areas with highest scores first, excluding names in ``skip``."""
+    rows = sorted(
+        ((k, v["score"]) for k, v in (area_scores or {}).items() if k not in skip),
+        key=lambda x: (-x[1], x[0]),
+    )
+    return rows[:n] if n else rows
+
+
 def shortlist_status(score: int) -> str:
     if score >= config.SHORTLIST_AT:
         return "shortlisted"

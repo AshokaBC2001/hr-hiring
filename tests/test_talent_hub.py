@@ -221,11 +221,15 @@ def test_generate_sample_interns_builds_400_sri_lankan_it_records():
         "Training_StartDate",
         "Training_EndDate",
         "field_of_spec_name",
+        "Trainee_Email",
+        "Institute",
     }
     it_count = 0
     for row in rows:
         assert set(row.keys()) == expected_keys
         assert row["Trainee_Name"].strip()
+        assert "@" in row["Trainee_Email"]
+        assert row["Institute"].strip()
         assert not any(ch.isdigit() for ch in row["Trainee_Name"])
         assert row["field_of_spec_name"].strip()
         if row["field_of_spec_name"] in it_specs:
@@ -430,3 +434,52 @@ def test_web_static_exposes_interns_page(tmp_path, monkeypatch):
             assert ".intern-stats" in css.text and ".spec-chip" in css.text and ".pager" in css.text
     finally:
         llm.set_backend(None)
+
+
+def test_talenthub_dates_ending_lookup_analytics_and_enrollment(fake_mongo):
+    assert talent_hub.as_local_date("2026-05-19T00:00:00.000Z") == "2026-05-19"
+    assert talent_hub.as_local_date("2026-05-18T18:30:00.000Z") == "2026-05-19"
+    assert talent_hub.as_local_date(datetime(2026, 5, 18, 18, 30, tzinfo=timezone.utc)) == "2026-05-19"
+    assert talent_hub.as_local_date("rubbish") == ""
+
+    talent_hub.seed_sample_interns(400)
+
+    class _MongoDirectBackend:
+        def list_interns(self):
+            return talent_hub.mongo_list_interns(limit=0)
+
+        def get_intern(self, identifier: str):
+            return talent_hub.mongo_get_intern(identifier)
+
+    talent_hub.set_backend(_MongoDirectBackend())
+    try:
+        from datetime import date, timedelta
+        cutoff = (date.today() + timedelta(days=7)).isoformat()
+        areas = ["AI/ML", "MLOps", "DevOps", "Flutter", "Web Development", "Data Analytics", "Cybersecurity", "Networking"]
+        ending = talent_hub.interns_ending_by(cutoff, areas)
+        assert len(ending) >= 10
+        assert all(r["area"] in areas and r["end_date"] <= cutoff for r in ending)
+
+        enriched = talent_hub.interns_with_area(areas, limit=0)
+        stats = talent_hub.analytics(enriched)
+        assert stats["total"] == 400
+        assert stats["ending_soon"] >= 10
+        assert stats["unknown_area"] >= 1
+        assert stats["by_institute"][0]["count"] > 0
+
+        matches = talent_hub.find_matching_interns(name="Kamal Perera")
+        assert len(matches) == 1 and matches[0]["Trainee_ID"] == "1042"
+
+        enrolled = talent_hub.enroll_sample_intern({
+            "Trainee_ID": "2001",
+            "Trainee_Name": "Saman Silva",
+            "Training_StartDate": "2026-11-16T00:00:00.000Z",
+            "Training_EndDate": "2027-05-15T00:00:00.000Z",
+            "field_of_spec_name": "AI/ML",
+            "Trainee_Email": "saman@example.com",
+            "Institute": "SLT Academy",
+        })
+        assert enrolled["intern"]["Trainee_ID"] == "2001"
+        assert enrolled["total"] == 401
+    finally:
+        talent_hub.set_backend(None)

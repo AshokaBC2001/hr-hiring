@@ -23,14 +23,14 @@ h2 { font-size: 15px; margin: 0; font-weight: 600; }
 
 /* ---------- top bar ---------- */
 .top { background: #fff; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10; }
-.top-in { max-width: 1200px; margin: 0 auto; padding: 0 20px; display: flex; align-items: center; gap: 24px; min-height: 52px; flex-wrap: wrap; }
+.top-in { max-width: 1200px; margin: 0 auto; padding: 0 20px; display: flex; align-items: center; gap: 16px; min-height: 52px; flex-wrap: wrap; }
 .brand { font-weight: 700; font-size: 16px; color: var(--text); }
 .brand:hover { text-decoration: none; }
-.menu { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
-.menu a { color: var(--text); padding: 15px 10px 13px; border-bottom: 2px solid transparent; }
+.menu { display: flex; gap: 0; flex-wrap: wrap; flex: 1; }
+.menu a { color: var(--text); padding: 15px 8px 13px; border-bottom: 2px solid transparent; font-size: 13.5px; white-space: nowrap; }
 .menu a:hover { text-decoration: none; color: var(--accent); }
 .menu a.on { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
-.menu .count { margin-left: 4px; font-size: 12px; font-weight: 600; color: var(--need); background: var(--need-bg); border: 1px solid var(--need-line);
+.menu .count { margin-left: 3px; font-size: 11.5px; font-weight: 600; color: var(--need); background: var(--need-bg); border: 1px solid var(--need-line);
   border-radius: 3px; padding: 0 5px; }
 .top-right { display: flex; align-items: center; gap: 16px; font-size: 13px; }
 .model { color: var(--muted); white-space: nowrap; }
@@ -64,6 +64,8 @@ ul.clean li + li, ol.clean li + li { margin-top: 4px; }
 
 /* ---------- numbers ---------- */
 .nums { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.nums.four { grid-template-columns: repeat(4, 1fr); }
+.nums.six { grid-template-columns: repeat(6, 1fr); }
 .num { display: block; background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 10px 14px; color: var(--text); }
 .num:hover { border-color: #aaa; text-decoration: none; }
 .num b { display: block; font-size: 24px; font-weight: 600; line-height: 1.2; }
@@ -154,7 +156,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .3); }
 .toast.bad { background: var(--fail); }
 
 /* ---------- interns (TalentHub MongoDB view) ---------- */
-.intern-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.intern-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
 .intern-stat { background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px; }
 .intern-stat b { display: block; font-size: 22px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .intern-stat span { color: var(--muted); font-size: 12.5px; }
@@ -169,13 +171,20 @@ dialog::backdrop { background: rgba(0, 0, 0, .3); }
 .pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 .pager .spacer { flex: 1; }
 .json-box { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; background: #fcfcfc; overflow-x: auto; font-size: 12px; line-height: 1.45; }
+.chk-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.chk-list label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+.chk-list label.done span { text-decoration: line-through; color: var(--muted); }
+.bar-row { display: grid; grid-template-columns: 180px 1fr 44px; gap: 8px; align-items: center; font-size: 12.5px; padding: 3px 0; }
+.bar-track { height: 8px; background: #eee; border-radius: 4px; overflow: hidden; }
+.bar-fill { height: 100%; background: var(--accent); }
 
 @media (max-width: 900px) {
   .grid.two, .add-grid { grid-template-columns: 1fr; }
   .grid.even { grid-auto-rows: auto; }
-  .nums { grid-template-columns: repeat(3, 1fr); }
+  .nums, .nums.six { grid-template-columns: repeat(3, 1fr); }
+  .nums.four { grid-template-columns: 1fr 1fr; }
   .search, .spec-select { width: 100%; max-width: none; }
 }
 @media (max-width: 560px) {
-  .nums, .intern-stats { grid-template-columns: 1fr 1fr; }
+  .nums, .nums.six, .intern-stats { grid-template-columns: 1fr 1fr; }
 }

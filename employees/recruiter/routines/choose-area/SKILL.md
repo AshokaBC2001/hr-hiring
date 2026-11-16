@@ -27,4 +27,4 @@ Reply with one JSON object only:
 
 ## If the checks keep failing
 The area with the best rule score is used if at least half of its required skills are in the
-CV. Otherwise the HR officer chooses the area.
+CV. Otherwise the CV goes to the pool with the label "No matching area".

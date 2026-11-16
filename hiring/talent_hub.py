@@ -16,16 +16,16 @@ import math
 import re
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from bson import ObjectId
 from pymongo import ASCENDING, MongoClient, UpdateOne
 from pymongo.errors import OperationFailure, PyMongoError
 
-from . import config
+from . import checks, config
 
 REQUIRED_FIELDS = (
     "Trainee_ID",
@@ -311,6 +311,8 @@ def mongo_list_interns(specialization: str = "", q: str = "", limit: int = 200) 
             {"Trainee_ID": rx},
             {"Trainee_Name": rx},
             {"field_of_spec_name": rx},
+            {"Trainee_Email": rx},
+            {"Institute": rx},
         ]
     try:
         cursor = coll.find(mongo_filter).sort("Trainee_ID", ASCENDING)
@@ -421,6 +423,162 @@ def get_intern(identifier: str) -> dict[str, Any] | None:
     return normalize_intern(resp.json())
 
 
+# ---- Planner / analytics helpers (reads directly from TalentHub / MongoDB) ---------
+LOCAL_TZ = timezone(timedelta(hours=config.LOCAL_UTC_OFFSET_HOURS))
+
+
+def as_local_date(value: Any) -> str:
+    """Convert UTC ISO date strings or datetimes into YYYY-MM-DD in local Sri Lanka time."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(LOCAL_TZ).date().isoformat()
+    text = str(value).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        return dt.date().isoformat()
+    return dt.astimezone(LOCAL_TZ).date().isoformat()
+
+
+def match_area(specialization: str, area_names: list[str]) -> str:
+    """Map a TalentHub specialization to an active HR Hiring area, or '' when unmapped."""
+    return checks.resolve_area(specialization, area_names) or ""
+
+
+def enrich_intern(
+    doc: dict[str, Any],
+    area_names: list[str],
+    today: date | None = None,
+    notice_days: int | None = None,
+) -> dict[str, Any]:
+    """Attach derived area mapping and cohort timing flags to a normalized intern record."""
+    today = today or date.today()
+    today_iso = today.isoformat()
+    days = config.VACANCY_NOTICE_DAYS if notice_days is None else notice_days
+    soon_iso = (today + timedelta(days=days)).isoformat()
+    start_date = as_local_date(doc.get("Training_StartDate"))
+    end_date = as_local_date(doc.get("Training_EndDate"))
+    area = match_area(doc.get("field_of_spec_name", ""), area_names)
+    finished = bool(end_date) and end_date < today_iso
+    ending_soon = bool(end_date) and today_iso <= end_date <= soon_iso
+    upcoming = bool(start_date) and start_date > today_iso
+    active = not finished and not upcoming
+    return {
+        **doc,
+        "start_date": start_date,
+        "end_date": end_date,
+        "area": area,
+        "finished": finished,
+        "ending_soon": ending_soon,
+        "upcoming": upcoming,
+        "active": active,
+    }
+
+
+def interns_with_area(
+    area_names: list[str],
+    specialization: str = "",
+    q: str = "",
+    limit: int = 0,
+    today: date | None = None,
+) -> list[dict[str, Any]]:
+    """Read interns directly from TalentHub API and annotate area & lifecycle state."""
+    raw = list_interns(specialization=specialization, q=q, limit=limit)
+    return [enrich_intern(r, area_names, today=today) for r in raw]
+
+
+def interns_ending_by(
+    cutoff: str | date,
+    area_names: list[str],
+    today: date | None = None,
+) -> list[dict[str, Any]]:
+    """Return active/mapped interns whose Training_EndDate is on or before ``cutoff``."""
+    cutoff_iso = cutoff.isoformat() if isinstance(cutoff, date) else str(cutoff)[:10]
+    rows = interns_with_area(area_names, limit=0, today=today)
+    matched = [r for r in rows if r["end_date"] and r["end_date"] <= cutoff_iso and r["area"]]
+    matched.sort(key=lambda r: (r["end_date"], r["Trainee_ID"]))
+    return matched
+
+
+def analytics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute summary counts and breakdowns across enriched intern rows."""
+    by_spec: dict[str, int] = {}
+    by_inst: dict[str, int] = {}
+    by_area: dict[str, int] = {}
+    for r in rows:
+        sp = r.get("field_of_spec_name") or "Unknown"
+        by_spec[sp] = by_spec.get(sp, 0) + 1
+        inst = r.get("Institute") or "Unspecified"
+        by_inst[inst] = by_inst.get(inst, 0) + 1
+        if r.get("area"):
+            by_area[r["area"]] = by_area.get(r["area"], 0) + 1
+    return {
+        "total": len(rows),
+        "active": sum(1 for r in rows if r.get("active")),
+        "ending_soon": sum(1 for r in rows if r.get("ending_soon")),
+        "finished": sum(1 for r in rows if r.get("finished")),
+        "upcoming": sum(1 for r in rows if r.get("upcoming")),
+        "unknown_area": sum(1 for r in rows if not r.get("area")),
+        "by_specialization": [
+            {"name": k, "count": v}
+            for k, v in sorted(by_spec.items(), key=lambda x: (-x[1], x[0]))
+        ],
+        "by_institute": [
+            {"name": k, "count": v}
+            for k, v in sorted(by_inst.items(), key=lambda x: (-x[1], x[0]))
+        ],
+        "by_area": by_area,
+    }
+
+
+def find_matching_interns(email: str = "", name: str = "") -> list[dict[str, Any]]:
+    """Find matching TalentHub interns by email or full name; returns [] cleanly if offline."""
+    clean_email = (email or "").strip().lower()
+    clean_name = re.sub(r"\s+", " ", (name or "").strip().lower())
+    if not clean_email and not clean_name:
+        return []
+    try:
+        rows = list_interns(limit=0)
+    except (TalentHubUnavailable, TalentHubAuthError):
+        return []
+    matches = []
+    for r in rows:
+        r_email = (r.get("Trainee_Email") or "").strip().lower()
+        r_name = re.sub(r"\s+", " ", (r.get("Trainee_Name") or "").strip().lower())
+        if (clean_email and r_email and clean_email == r_email) or (clean_name and r_name and clean_name == r_name):
+            matches.append(r)
+    return matches
+
+
+def is_sample_mongo_target() -> bool:
+    """True only when configured against a local sample MongoDB or injected fake collection."""
+    if _mongo_collection_override is not None:
+        return True
+    parsed = urlparse(config.TALENT_HUB_MONGO_URI)
+    host = (parsed.hostname or "").lower()
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def enroll_sample_intern(record: dict[str, Any]) -> dict[str, Any]:
+    """Upsert a selected candidate into the LOCAL sample MongoDB interns collection.
+
+    Refuses writes if ``TALENT_HUB_MONGO_URI`` points outside localhost so read-only
+    external TalentHub boundaries can never be violated accidentally.
+    """
+    if not is_sample_mongo_target():
+        raise PermissionError("Enrolling interns is restricted to the local sample MongoDB database.")
+    ensure_collection()
+    res = upsert_interns([record])
+    saved = mongo_get_intern(record["Trainee_ID"])
+    return {"intern": saved, **res}
+
+
 # ---- Deterministic sample generator & seeder ---------------------------------------
 _NAME_COMMUNITIES = (
     (
@@ -492,6 +650,40 @@ _WEIGHTED_SPECS = (
 )
 
 
+_INSTITUTES = (
+    "University of Moratuwa",
+    "UCSC (University of Colombo)",
+    "SLIIT",
+    "Informatics Institute of Technology (IIT)",
+    "NSBM Green University",
+    "NIBM",
+    "University of Peradeniya",
+    "University of Kelaniya",
+    "Sabaragamuwa University",
+    "Wayamba University",
+)
+# First 12 indices (away from 1042/1043) are anchored relative to today so Planner always sees live vacancies.
+_UPCOMING_ENDING_SLOTS = (
+    ("MLOps", 2),
+    ("MLOps", 4),
+    ("MLOps", 6),
+    ("AI/ML", 1),
+    ("AI/ML", 5),
+    ("Flutter", 2),
+    ("Flutter", 6),
+    ("DevOps", 3),
+    ("Web Development", 4),
+    ("Data Analytics", 5),
+    ("Cybersecurity", 3),
+    ("Civil Engineering", 3),  # intentionally unmapped specialization for Planner/UI edge testing
+)
+
+
+def _intern_email(name: str, trainee_id: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", ".", name.lower()).strip(".")
+    return f"{slug}.{trainee_id}@interns.slt.lk"
+
+
 def _sri_lankan_name_pool() -> list[str]:
     reserved = {"Kamal Perera", "Nimali Silva"}
     groups: list[list[str]] = []
@@ -515,10 +707,11 @@ def _sri_lankan_name_pool() -> list[str]:
     return pool
 
 
-def generate_sample_interns(count: int = 400) -> list[dict[str, Any]]:
-    """Build deterministic Sri Lankan, IT-focused sample intern records."""
+def generate_sample_interns(count: int = 400, reference_date: date | None = None) -> list[dict[str, Any]]:
+    """Build deterministic Sri Lankan, IT-focused sample intern records with institutes & emails."""
     if count < 1:
         raise ValueError("count must be at least 1.")
+    ref_day = reference_date or date.today()
     names_pool = _sri_lankan_name_pool()
     rows: list[dict[str, Any]] = []
     pool_idx = 0
@@ -530,21 +723,30 @@ def generate_sample_interns(count: int = 400) -> list[dict[str, Any]]:
             start_dt = parse_utc_date("2025-01-01T00:00:00.000Z")
             end_dt = parse_utc_date("2025-06-30T00:00:00.000Z")
             spec = "Software Engineering"
+            institute = "University of Moratuwa"
         elif trainee_id == "1043":
             name = "Nimali Silva"
             start_dt = parse_utc_date("2025-02-15T00:00:00.000Z")
             end_dt = parse_utc_date("2025-08-15T00:00:00.000Z")
             spec = "Network Engineering"
+            institute = "SLIIT"
         else:
             if pool_idx < len(names_pool):
                 name = names_pool[pool_idx]
             else:
                 name = f"{names_pool[pool_idx % len(names_pool)]} {i + 1}"
             pool_idx += 1
-            base_start = parse_utc_date(_SAMPLE_START_DATES[i % len(_SAMPLE_START_DATES)])
-            start_dt = base_start + timedelta(days=(i // len(_SAMPLE_START_DATES)))
-            end_dt = start_dt + timedelta(days=_COHORT_DAYS[i % len(_COHORT_DAYS)])
-            spec = _WEIGHTED_SPECS[i % len(_WEIGHTED_SPECS)]
+            institute = _INSTITUTES[i % len(_INSTITUTES)]
+            if i < len(_UPCOMING_ENDING_SLOTS):
+                spec, offset_days = _UPCOMING_ENDING_SLOTS[i]
+                end_day = ref_day + timedelta(days=offset_days)
+                end_dt = datetime(end_day.year, end_day.month, end_day.day, tzinfo=timezone.utc)
+                start_dt = end_dt - timedelta(days=180)
+            else:
+                base_start = parse_utc_date(_SAMPLE_START_DATES[i % len(_SAMPLE_START_DATES)])
+                start_dt = base_start + timedelta(days=(i // len(_SAMPLE_START_DATES)))
+                end_dt = start_dt + timedelta(days=_COHORT_DAYS[i % len(_COHORT_DAYS)])
+                spec = _WEIGHTED_SPECS[i % len(_WEIGHTED_SPECS)]
 
         rows.append({
             "Trainee_ID": trainee_id,
@@ -552,6 +754,8 @@ def generate_sample_interns(count: int = 400) -> list[dict[str, Any]]:
             "Training_StartDate": format_utc_date(start_dt),
             "Training_EndDate": format_utc_date(end_dt),
             "field_of_spec_name": spec,
+            "Trainee_Email": _intern_email(name, trainee_id),
+            "Institute": institute,
         })
     return rows
 

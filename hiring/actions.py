@@ -6,11 +6,12 @@ status first, so an action can only happen at the right moment.
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import select
 
-from . import checks, config, db, tools
+from . import checks, config, db, mailer, talent_hub, tools, vacancies
 
 
 class ActionError(Exception):
@@ -167,6 +168,7 @@ def close(app_no: str) -> None:
     _need(c, {"needs_person", "needs_area"}, "Closing")
     db.update_candidate(c.id, expect_status=c.status, status="closed", outcome="Closed by HR officer")
     db.log_event(c.id, "HR officer", "Closed the application without a reply.")
+    vacancies.on_result(c.id)
 
 
 def resolve_flag(app_no: str, index: int) -> None:
@@ -178,6 +180,227 @@ def resolve_flag(app_no: str, index: int) -> None:
     flags[index]["resolved_at"] = db.now()
     db.update_candidate(c.id, flags=flags)
     db.log_event(c.id, "HR officer", f"Marked as checked: {flags[index]['text'][:120]}")
+
+
+# ---- The CV pool (HR officer) --------------------------------------------------------------
+def _profile(c: db.Candidate) -> dict:
+    return c.profile or tools.rule_profile(c.cv_text, tools.skill_vocabulary(db.active_areas()))
+
+
+def invite_from_pool(app_no: str, area_name: str) -> dict:
+    """Invite a pooled CV for an area so it enters the hiring flow as Shortlisted."""
+    c = _candidate(app_no)
+    _need(c, config.POOL_STATUSES, "Inviting to interview")
+    area = db.area_by_name(area_name)
+    if area is None or not area.active:
+        raise ActionError(f'"{area_name}" is not an active area.')
+    profile = _profile(c)
+    score, parts, gaps = tools.score_cv(profile, c.cv_text, area)
+    if score is None:
+        raise ActionError(f"{area.name} has no required skills yet. Add them on the Areas page first.")
+    same = area.name == c.area
+    fields = dict(status="shortlisted", area=area.name, profile=profile, score=score, score_parts=parts, gaps=gaps)
+    if not same:
+        fields.update(
+            area_source="Chosen by HR officer",
+            area_reasons=["Chosen by the HR officer from the pool."],
+            area_evidence=[],
+        )
+    if not db.update_candidate(c.id, expect_status=c.status, **fields):
+        raise ActionError("The candidate changed while you were working. Reload the page.")
+    db.log_event(c.id, "HR officer", f"Invited to interview from the pool for {area.name} (score {score} of 100).")
+    return {"status": "shortlisted", "area": area.name, "score": score}
+
+
+def archive(app_no: str) -> None:
+    c = _candidate(app_no)
+    _need(c, config.POOL_STATUSES | {"needs_person"}, "Archiving")
+    if not db.update_candidate(c.id, expect_status=c.status, status="archived", outcome="Archived by HR officer"):
+        raise ActionError("The candidate changed while you were working. Reload the page.")
+    db.log_event(c.id, "HR officer", "Archived the CV (removed from the pool).")
+
+
+def restore(app_no: str) -> str:
+    """Restore an archived CV back to 'new' so Recruiter scores it against active areas."""
+    c = _candidate(app_no)
+    _need(c, {"archived"}, "Restoring")
+    if not db.update_candidate(c.id, expect_status="archived", status="new", outcome=""):
+        raise ActionError("The candidate changed while you were working. Reload the page.")
+    db.log_event(c.id, "HR officer", "Restored the CV to the pool. The Recruiter reads it again.")
+    return "new"
+
+
+def rescore_pool() -> dict:
+    """Rescore pooled CVs whenever areas change, and requeue unmapped CVs."""
+    areas = db.active_areas()
+    rescored = requeued = 0
+    for c in db.candidates_in({"in_pool"}):
+        profile = _profile(c)
+        scores = tools.score_all_areas(profile, c.cv_text, areas)
+        area, source = c.area, c.area_source
+        if area not in scores:
+            best = tools.top_areas(scores, n=1)
+            area, source = (best[0][0], "Chosen by rules") if best else ("", "")
+        fields = dict(area_scores=scores, area=area, area_source=source)
+        if area:
+            fields.update(score=scores[area]["score"], score_parts=scores[area]["parts"], gaps=scores[area]["gaps"])
+        else:
+            fields.update(status="no_area", score=None, score_parts={}, gaps=[])
+        if db.update_candidate(c.id, expect_status="in_pool", **fields):
+            rescored += 1
+    for c in db.candidates_in({"no_area"}):
+        if db.update_candidate(c.id, expect_status="no_area", status="new"):
+            db.log_event(c.id, "HR officer", "The areas changed, so the CV was sent back to the Recruiter.")
+            requeued += 1
+    return {"rescored": rescored, "requeued": requeued}
+
+
+# ---- Vacancies (HR officer) ----------------------------------------------------------
+def approve_suggestion(vacancy_id: int, app_no: str) -> dict:
+    """Approve a suggested CV for an open vacancy and move it into the interview flow."""
+    v = db.get_vacancy(vacancy_id)
+    if v is None:
+        raise ActionError("There is no such vacancy.")
+    if v.status != "open":
+        raise ActionError(f"This vacancy is {v.status}.")
+    if not any(s["app_no"] == app_no and s["state"] == "suggested" for s in (v.suggestions or [])):
+        raise ActionError(f"{app_no} is not waiting for your approval on this vacancy.")
+    out = invite_from_pool(app_no, v.area)
+    c = _candidate(app_no)
+    db.update_candidate(c.id, vacancy_id=v.id)
+    rows = [dict(s) for s in v.suggestions]
+    for s in rows:
+        if s["app_no"] == app_no:
+            s["state"], s["at"] = "approved", db.now()
+    db.update_vacancy(v.id, suggestions=rows)
+    vacancies.mark_taken_elsewhere(app_no, v.id)
+    db.log_event(c.id, "HR officer", f"Approved for the {v.area} vacancy.")
+    return out
+
+
+def decline_suggestion(vacancy_id: int, app_no: str) -> None:
+    """Pass over a vacancy suggestion and promote the next best pool CV."""
+    v = db.get_vacancy(vacancy_id)
+    if v is None or v.status != "open":
+        raise ActionError("There is no open vacancy with that number.")
+    rows = [dict(s) for s in (v.suggestions or [])]
+    if not any(s["app_no"] == app_no and s["state"] == "suggested" for s in rows):
+        raise ActionError(f"{app_no} is not waiting for your approval on this vacancy.")
+    for s in rows:
+        if s["app_no"] == app_no:
+            s["state"], s["at"] = "failed", db.now()
+    db.update_vacancy(v.id, suggestions=rows)
+    fresh = db.get_vacancy(v.id)
+    if fresh:
+        vacancies.refresh_suggestions(fresh)
+
+
+def add_vacancy(area_name: str, places: int, reason: str, opens_on: str = "") -> int:
+    """Manually open a vacancy (for example when an intern leaves early)."""
+    area = db.area_by_name(area_name)
+    if area is None or not area.active:
+        raise ActionError(f'"{area_name}" is not an active area.')
+    try:
+        places = int(places)
+    except (TypeError, ValueError):
+        raise ActionError("How many places? Type a number.") from None
+    if not 1 <= places <= 50:
+        raise ActionError("The number of places must be between 1 and 50.")
+    opens_on = (opens_on or "").strip()[:10] or date.today().isoformat()
+    with db.Session() as s:
+        v = db.Vacancy(
+            area=area.name,
+            places=places,
+            opens_on=opens_on,
+            reason=(reason or "").strip()[:500] or "Opened by the HR officer.",
+            trainee_ids=[],
+            suggestions=[],
+            status="open",
+            created_by="HR officer",
+            created_at=db.now(),
+            updated_at=db.now(),
+        )
+        s.add(v)
+        s.commit()
+        vacancy_id = v.id
+    fresh = db.get_vacancy(vacancy_id)
+    if fresh:
+        vacancies.refresh_suggestions(fresh)
+    return vacancy_id
+
+
+def close_vacancy(vacancy_id: int) -> None:
+    v = db.get_vacancy(vacancy_id)
+    if v is None:
+        raise ActionError("There is no such vacancy.")
+    if v.status != "open":
+        raise ActionError(f"This vacancy is already {v.status}.")
+    db.update_vacancy(v.id, status="closed", reason=v.reason + " - closed by the HR officer.")
+
+
+# ---- Database & Onboarding helpers -----------------------------------------------------
+def toggle_checklist(app_no: str, index: int, done: bool | None = None) -> list[dict]:
+    """Toggle or set completion on one item in a selected candidate's onboarding checklist."""
+    c = _candidate(app_no)
+    items = [dict(x) for x in (c.checklist or [])]
+    if not 0 <= index < len(items):
+        raise ActionError("Unknown checklist item.")
+    new_val = (not bool(items[index].get("done"))) if done is None else bool(done)
+    items[index]["done"] = new_val
+    items[index]["done_at"] = db.now() if new_val else ""
+    db.update_candidate(c.id, checklist=items)
+    verb = "Completed" if new_val else "Unchecked"
+    db.log_event(c.id, "HR officer", f"{verb} onboarding task: {items[index].get('item', '')[:120]}")
+    return items
+
+
+def add_candidate_note(app_no: str, text: str, actor: str = "HR officer") -> list[dict]:
+    """Attach a persistent timestamped note to a candidate record."""
+    c = _candidate(app_no)
+    clean = (text or "").strip()[:1000]
+    if not clean:
+        raise ActionError("Write a note before saving.")
+    notes = list(c.hr_notes or [])
+    notes.append({"text": clean, "by": actor, "at": db.now()})
+    db.update_candidate(c.id, hr_notes=notes)
+    db.log_event(c.id, actor, f"Added note: {clean[:120]}")
+    return notes
+
+
+def enroll_candidate_as_intern(app_no: str, months: int = 6) -> dict:
+    """Record a hired/selected candidate into the local sample MongoDB interns collection."""
+    c = _candidate(app_no)
+    if not c.work_id:
+        raise ActionError("A work ID is required before enrolling as an intern.")
+    if not c.area:
+        raise ActionError("Assign an area before enrolling as an intern.")
+    months = max(1, min(int(months), 24))
+    today = date.today()
+    end_day = today + timedelta(days=30 * months)
+    start_dt = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+    end_dt = datetime(end_day.year, end_day.month, end_day.day, tzinfo=timezone.utc)
+    edu_list = (c.profile or {}).get("education") or []
+    record = {
+        "Trainee_ID": str(c.work_id),
+        "Trainee_Name": c.name or c.app_no,
+        "Training_StartDate": talent_hub.format_utc_date(start_dt),
+        "Training_EndDate": talent_hub.format_utc_date(end_dt),
+        "field_of_spec_name": c.area,
+        **({"Trainee_Email": c.email} if c.email else {}),
+        **({"Institute": str(edu_list[0])[:120]} if edu_list else {}),
+    }
+    try:
+        res = talent_hub.enroll_sample_intern(record)
+    except PermissionError as exc:
+        raise ActionError(str(exc)) from exc
+    except talent_hub.TalentHubUnavailable as exc:
+        raise ActionError(str(exc)) from exc
+    db.log_event(
+        c.id,
+        "HR officer",
+        f"Enrolled into local sample MongoDB interns as Trainee ID {record['Trainee_ID']} ({c.area}).",
+    )
+    return res
 
 
 # ---- Interviewer -------------------------------------------------------------------------
@@ -198,6 +421,7 @@ def enter_result(app_no: str, result: str, comment: str = "") -> str:
                                result_at=db.now()):
         raise ActionError("The candidate changed while you were working. Reload the page.")
     db.log_event(c.id, "Interviewer", f"Entered the result: {result}." + (f" Comment: {comment}" if comment else ""))
+    vacancies.on_result(c.id)
     return new
 
 
@@ -252,15 +476,66 @@ def release_draft(draft_id: int) -> str:
         fname = re.sub(r"[^A-Za-z0-9_-]", "", f"{c.app_no}_{d.kind}_{d.id}") + ".txt"
         (db.paths.outbox / fname).write_text(
             f"To: {c.name} <{c.email}>\nSubject: {d.subject}\nReleased: {db.now()}\n\n{d.body}\n", encoding="utf-8")
+        delivery = mailer.send_email(
+            c.email,
+            c.name,
+            d.subject,
+            d.body,
+            meta={"app_no": c.app_no, "kind": d.kind, "area": c.area, "work_id": c.work_id},
+        )
         d.status, d.released_at, d.file = "released", db.now(), fname
+        d.delivery_status = delivery["status"]
+        d.delivery_error = delivery["error"]
+        d.sent_to = delivery["sent_to"]
+        d.message_id = delivery["message_id"]
+        d.sent_at = db.now() if delivery["status"] == "sent" else ""
         c.status = after
         if outcome:
             c.outcome = outcome + (f" (work ID {c.work_id})" if d.kind == "acceptance" and c.work_id else "")
         c.updated_at = db.now()
         s.commit()
         cid, label = c.id, KIND_LABELS[d.kind]
-    db.log_event(cid, "HR officer", f"Released the {label}. It was saved to the outbox (not sent).")
+    if delivery["status"] == "sent":
+        db.log_event(cid, "HR officer", f"Released and emailed the {label} to {delivery['sent_to']} (outbox/{fname}).")
+    elif delivery["status"] == "failed":
+        db.log_event(cid, "HR officer", f"Released the {label} to outbox, but SMTP failed: {delivery['error']}")
+    else:
+        db.log_event(cid, "HR officer", f"Released the {label}. Saved to the outbox (live SMTP disabled).")
+    if after == "closed":
+        vacancies.on_result(cid)
     return after
+
+
+def resend_draft(draft_id: int) -> dict:
+    """Dispatch or retry live SMTP delivery on an already-released draft."""
+    with db.Session() as s:
+        d = s.get(db.Draft, draft_id)
+        if d is None or d.status != "released":
+            raise ActionError("Only released emails can be sent or retried.")
+        c = s.get(db.Candidate, d.candidate_id)
+        if not c.email or not checks.EMAIL_RE.fullmatch(c.email):
+            raise ActionError("Candidate has no valid email address.")
+        delivery = mailer.send_email(
+            c.email,
+            c.name,
+            d.subject,
+            d.body,
+            meta={"app_no": c.app_no, "kind": d.kind, "area": c.area, "work_id": c.work_id},
+            force=True,
+        )
+        d.delivery_status = delivery["status"]
+        d.delivery_error = delivery["error"]
+        d.sent_to = delivery["sent_to"]
+        d.message_id = delivery["message_id"]
+        if delivery["status"] == "sent":
+            d.sent_at = db.now()
+        s.commit()
+        cid, label = c.id, KIND_LABELS[d.kind]
+    if delivery["status"] == "sent":
+        db.log_event(cid, "HR officer", f"Sent the released {label} via SMTP to {delivery['sent_to']}.")
+    else:
+        db.log_event(cid, "HR officer", f"SMTP send attempt failed for {label}: {delivery['error']}")
+    return delivery
 
 
 # ---- Areas (HR officer) --------------------------------------------------------------------

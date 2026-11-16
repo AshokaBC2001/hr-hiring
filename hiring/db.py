@@ -46,6 +46,8 @@ class Candidate(Base):
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_parts: Mapped[dict] = mapped_column(JSON, default=dict)
     gaps: Mapped[list] = mapped_column(JSON, default=list)
+    vacancy_id: Mapped[int | None] = mapped_column(Integer, default=None)   # invited to fill this vacancy
+    area_scores: Mapped[dict] = mapped_column(JSON, default=dict)   # pool: {area: {score, parts, gaps}}
     questions: Mapped[list] = mapped_column(JSON, default=list)
     questions_source: Mapped[str] = mapped_column(String(40), default="")
     interview_at: Mapped[str] = mapped_column(String(40), default="")
@@ -55,6 +57,7 @@ class Candidate(Base):
     result_at: Mapped[str] = mapped_column(String(40), default="")
     work_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     checklist: Mapped[list] = mapped_column(JSON, default=list)
+    hr_notes: Mapped[list] = mapped_column(JSON, default=list)
     flags: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[str] = mapped_column(String(40), default="")
     updated_at: Mapped[str] = mapped_column(String(40), default="")
@@ -71,6 +74,11 @@ class Draft(Base):
     written_by: Mapped[str] = mapped_column(String(60), default="")
     check_notes: Mapped[list] = mapped_column(JSON, default=list)
     file: Mapped[str] = mapped_column(String(255), default="")
+    delivery_status: Mapped[str] = mapped_column(String(20), default="not_sent")  # not_sent / outbox_only / sent / failed
+    delivery_error: Mapped[str] = mapped_column(Text, default="")
+    sent_at: Mapped[str] = mapped_column(String(40), default="")
+    sent_to: Mapped[str] = mapped_column(String(200), default="")
+    message_id: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[str] = mapped_column(String(40), default="")
     released_at: Mapped[str] = mapped_column(String(40), default="")
 
@@ -108,6 +116,23 @@ class Area(Base):
     checklist: Mapped[list] = mapped_column(JSON, default=list)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     added_by: Mapped[str] = mapped_column(String(40), default="")
+
+
+class Vacancy(Base):
+    """A place (or places) to fill in one area, opened when MongoDB interns are finishing."""
+    __tablename__ = "vacancies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    area: Mapped[str] = mapped_column(String(80), index=True)
+    places: Mapped[int] = mapped_column(Integer, default=1)
+    opens_on: Mapped[str] = mapped_column(String(10), default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    trainee_ids: Mapped[list] = mapped_column(JSON, default=list)
+    suggestions: Mapped[list] = mapped_column(JSON, default=list)   # [{app_no, name, score, state}]
+    filled: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)   # open, filled, closed
+    created_by: Mapped[str] = mapped_column(String(40), default="")
+    created_at: Mapped[str] = mapped_column(String(40), default="")
+    updated_at: Mapped[str] = mapped_column(String(40), default="")
 
 
 class Brief(Base):
@@ -162,6 +187,7 @@ def setup(data_dir: Path | None = None) -> None:
     _engine = create_engine(f"sqlite:///{paths.db}", connect_args={"check_same_thread": False, "timeout": 30})
     Session.configure(bind=_engine)
     Base.metadata.create_all(_engine)
+    _add_missing_columns()
     with Session() as s:
         if s.scalar(select(func.count(Area.id))) == 0:
             for a in json.loads(config.AREAS_FILE.read_text(encoding="utf-8")):
@@ -177,6 +203,32 @@ def setup(data_dir: Path | None = None) -> None:
         if s.get(Setting, "paused") is None:
             s.add(Setting(key="paused", value="0"))
         s.commit()
+
+
+def _add_missing_columns() -> None:
+    """Upgrade existing register.db files with newly added columns without losing rows."""
+    with _engine.begin() as conn:
+        for table in (Candidate.__table__, Draft.__table__):
+            existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table.name})")}
+            for col in table.columns:
+                if col.name in existing or col.primary_key:
+                    continue
+                col_type = col.type.compile(dialect=_engine.dialect)
+                default_sql = ""
+                if col.default is not None:
+                    if col.default.is_scalar:
+                        arg = col.default.arg
+                        if isinstance(arg, str):
+                            default_sql = " DEFAULT '" + arg.replace("'", "''") + "'"
+                        elif isinstance(arg, (int, float)) and not isinstance(arg, bool):
+                            default_sql = f" DEFAULT {arg}"
+                    elif col.default.is_callable and str(col_type) == "JSON":
+                        sample = col.default.arg(None)
+                        if sample == {}:
+                            default_sql = " DEFAULT '{}'"
+                        elif sample == []:
+                            default_sql = " DEFAULT '[]'"
+                conn.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}{default_sql}")
 
 
 # ---- small helpers ----------------------------------------------------------------
@@ -272,6 +324,30 @@ def candidates_in(statuses: set[str] | str, limit: int | None = None) -> list[Ca
         if limit:
             q = q.limit(limit)
         return list(s.scalars(q))
+
+
+def vacancies_in(statuses: set[str] | str) -> list[Vacancy]:
+    statuses = {statuses} if isinstance(statuses, str) else statuses
+    with Session() as s:
+        return list(s.scalars(select(Vacancy).where(Vacancy.status.in_(statuses))
+                              .order_by(Vacancy.opens_on, Vacancy.id)))
+
+
+def get_vacancy(vacancy_id: int) -> Vacancy | None:
+    with Session() as s:
+        return s.get(Vacancy, vacancy_id)
+
+
+def update_vacancy(vacancy_id: int, **fields: Any) -> bool:
+    with Session() as s:
+        v = s.get(Vacancy, vacancy_id)
+        if v is None:
+            return False
+        for k, val in fields.items():
+            setattr(v, k, val)
+        v.updated_at = now()
+        s.commit()
+        return True
 
 
 def active_areas() -> list[Area]:

@@ -1,12 +1,15 @@
 """How each AI employee works, written as LangGraph graphs.
 
 The status in the register is the hand-off between employees:
-    Recruiter    New CV                                -> Shortlisted / Borderline / Not shortlisted (confirm) / Area needs a person
+    Recruiter    New CV                                -> Waiting in pool / No matching area / CV needs a person
+                 (the CV is scored for every area; the HR officer invites from the pool)
+    HR officer   Waiting in pool -> Invite to interview -> Shortlisted
     Coordinator  Shortlisted                           -> Invitation waiting for release
                  Not shortlisted                       -> Reply waiting for release
                  Failed / On hold (result entered)     -> Reply / Hold note waiting for release
     Onboarding   Passed                                -> Acceptance waiting for release
-    Chief of staff (daily)                             -> morning brief, stalled flags
+    Planner      Reads MongoDB interns via TalentHub   -> opens vacancies, suggests top CVs from pool
+    Chief of staff (daily)                             -> archives old CVs, morning brief, stalled flags
 
 Each graph reads one candidate, does its routines and saves everything in one
 last step, only if the candidate is still in the status it started from.
@@ -22,13 +25,14 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import func, select
 
-from . import checks, config, db, llm, tools
+from . import checks, config, db, llm, talent_hub, tools, vacancies
 from .employees import EMPLOYEES, StepResult, ask_checked
 
 # ---- What each employee is doing (shown on the AI team page) ------------------------
 TEAM: dict[str, dict] = {k: {"state": "idle", "doing": "", "last_run": "", "last_note": ""} for k in EMPLOYEES}
 NOTICE = {"text": "", "at": ""}      # e.g. "The model server is not running"
 WORK_LOCK = threading.Lock()         # one model job at a time (8GB Mac, one local model)
+PLANNER_LOCK = threading.Lock()      # the Planner uses no model, so it has its own lock
 
 TRIGGERS = {
     "recruiter": {"new"},
@@ -83,6 +87,7 @@ class RecruiterState(TypedDict, total=False):
     score: int | None
     parts: dict
     gaps: list
+    area_scores: dict
     status: str
     flags: list
     events: list
@@ -184,12 +189,10 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
     events = list(s["events"])
     area, source = v["area"], ("Chosen by rules" if v.get("by_rules") else "Suggested by AI")
     if v.get("new_area"):
-        flags.append(f'AI suggested a new area: "{v["new_area"]}". Add it on the Areas page, or choose an area.')
-        events.append(f'Suggested a new area: {v["new_area"]}.')
+        events.append(f'No area on the list fits. Suggested a new area: {v["new_area"]}.')
         area = ""
     elif area == config.NEEDS_REVIEW_AREA:
-        flags.append("The Recruiter could not choose an area. Please choose one.")
-        events.append("Could not choose an area; asked the HR officer.")
+        events.append("No area on the list fits this CV.")
         area = ""
     else:
         events.append(f"Chose the area {area} ({'chosen by rules' if v.get('by_rules') else 'suggested by AI'}; {HOW_TEXT[res.how]}).")
@@ -208,24 +211,29 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
 
 
 def r_route_area(s: RecruiterState) -> str:
-    return "score" if s.get("area") else "needs_area"
+    return "score" if s.get("area") else "no_area"
 
 
-def r_needs_area(s: RecruiterState) -> RecruiterState:
-    return {"status": "needs_area"}
+def r_no_area(s: RecruiterState) -> RecruiterState:
+    """No area fits: the CV waits in the pool as 'No matching area' and is re-read when areas change."""
+    started = time.time()
+    scores = tools.score_all_areas(s["profile"], s["cv_text"], db.active_areas())
+    _record("recruiter", "add-to-pool", s["cid"], started, note="No matching area")
+    return {"status": "no_area", "area_scores": scores,
+            "events": s["events"] + ['Added to the pool as "No matching area".']}
 
 
 def r_score_match(s: RecruiterState) -> RecruiterState:
     started = time.time()
-    area = db.area_by_name(s["area"])
-    score, parts, gaps = tools.score_cv(s["profile"], s["cv_text"], area)
-    _record("recruiter", "score-match", s["cid"], started)
-    if score is None:
-        return {"score": None, "parts": {}, "gaps": [], "status": "needs_area",
+    scores = tools.score_all_areas(s["profile"], s["cv_text"], db.active_areas())
+    _record("recruiter", "score-match", s["cid"], started, note=f"Scored for {len(scores)} area(s)")
+    best = scores.get(s["area"])
+    if best is None:
+        return {"score": None, "parts": {}, "gaps": [], "area_scores": scores, "status": "no_area",
                 "flags": s["flags"] + [f"The area {s['area']} has no required skills yet, so it cannot be scored. "
                                        "Add them on the Areas page."]}
-    return {"score": score, "parts": parts, "gaps": gaps,
-            "events": s["events"] + [f"Scored {score} of 100 for {s['area']}."]}
+    return {"score": best["score"], "parts": best["parts"], "gaps": best["gaps"], "area_scores": scores,
+            "events": s["events"] + [f"Scored the CV for {len(scores)} area(s). {s['area']}: {best['score']} of 100."]}
 
 
 def r_skill_gap(s: RecruiterState) -> RecruiterState:
@@ -235,14 +243,14 @@ def r_skill_gap(s: RecruiterState) -> RecruiterState:
     return {"events": s["events"] + [("Skill gaps: " + ", ".join(gaps) + ".") if gaps else "No skill gaps."]}
 
 
-def r_shortlist(s: RecruiterState) -> RecruiterState:
+def r_add_to_pool(s: RecruiterState) -> RecruiterState:
     started = time.time()
-    status = tools.shortlist_status(s["score"])
-    _record("recruiter", "shortlist", s["cid"], started)
-    text = {"shortlisted": "Shortlisted (score 60 or above).",
-            "borderline": "Borderline score (50 to 59); the HR officer decides.",
-            "not_shortlisted_check": "Score below 50; the HR officer must confirm Not shortlisted."}[status]
-    return {"status": status, "events": s["events"] + [text]}
+    others = tools.top_areas(s.get("area_scores", {}), skip=(s["area"],), n=config.POOL_OTHER_AREAS)
+    _record("recruiter", "add-to-pool", s["cid"], started)
+    text = f"Added to the pool. Best area: {s['area']} ({s['score']} of 100)."
+    if others:
+        text += " Other good areas: " + ", ".join(f"{n} {sc}" for n, sc in others) + "."
+    return {"status": "in_pool", "events": s["events"] + [text]}
 
 
 def r_save(s: RecruiterState) -> RecruiterState:
@@ -253,7 +261,7 @@ def r_save(s: RecruiterState) -> RecruiterState:
                       area=s.get("area", ""), area_source=s.get("area_source", ""),
                       area_reasons=s.get("reasons", []), area_evidence=s.get("evidence", []),
                       suggested_new_area=s.get("new_area", ""), score=s.get("score"),
-                      score_parts=s.get("parts", {}), gaps=s.get("gaps", []))
+                      score_parts=s.get("parts", {}), gaps=s.get("gaps", []), area_scores=s.get("area_scores", {}))
     if db.update_candidate(s["cid"], expect_status="new", **fields):
         for e in s.get("events", []):
             db.log_event(s["cid"], "Recruiter", e)
@@ -266,20 +274,20 @@ def _build_recruiter():
     g = StateGraph(RecruiterState)
     for name, fn in [("load", r_load), ("unreadable", r_unreadable), ("parse_cv", r_parse_cv),
                      ("duplicate_check", r_duplicate_check), ("choose_area", r_choose_area),
-                     ("needs_area", r_needs_area), ("score_match", r_score_match), ("skill_gap", r_skill_gap),
-                     ("shortlist", r_shortlist), ("save", r_save)]:
+                     ("no_area", r_no_area), ("score_match", r_score_match), ("skill_gap", r_skill_gap),
+                     ("add_to_pool", r_add_to_pool), ("save", r_save)]:
         g.add_node(name, fn)
     g.add_edge(START, "load")
     g.add_conditional_edges("load", r_route_text, {"parse": "parse_cv", "unreadable": "unreadable"})
     g.add_edge("unreadable", "save")
     g.add_edge("parse_cv", "duplicate_check")
     g.add_edge("duplicate_check", "choose_area")
-    g.add_conditional_edges("choose_area", r_route_area, {"score": "score_match", "needs_area": "needs_area"})
-    g.add_edge("needs_area", "save")
+    g.add_conditional_edges("choose_area", r_route_area, {"score": "score_match", "no_area": "no_area"})
+    g.add_edge("no_area", "save")
     g.add_conditional_edges("score_match", lambda s: "gap" if s.get("score") is not None else "save",
                             {"gap": "skill_gap", "save": "save"})
-    g.add_edge("skill_gap", "shortlist")
-    g.add_edge("shortlist", "save")
+    g.add_edge("skill_gap", "add_to_pool")
+    g.add_edge("add_to_pool", "save")
     g.add_edge("save", END)
     return g.compile()
 
@@ -558,6 +566,11 @@ def k_read_run_logs(s: ChiefState) -> ChiefState:
         "total_items_needing_a_person": 0,
         "waiting_for_interview_results": _count({"awaiting_result", "on_hold"}),
         "new_cvs_not_read_yet": _count({"new"}),
+        "cvs_waiting_in_pool": _count(config.POOL_STATUSES),
+        "open_vacancies": len(db.vacancies_in("open")),
+        "candidates_suggested_for_a_vacancy": sum(
+            1 for v in db.vacancies_in("open") for sg in (v.suggestions or []) if sg["state"] == "suggested"
+        ),
         "last_24_hours": {
             "cvs_read": sum(1 for r in runs if r.routine == "parse-cv"),
             "invitations_drafted": sum(1 for e in events if e.text.startswith("Drafted the interview invitation")),
@@ -569,6 +582,31 @@ def k_read_run_logs(s: ChiefState) -> ChiefState:
     }
     facts["total_items_needing_a_person"] = sum(facts["needs_a_person_today"].values())
     _record("chief-of-staff", "read-run-logs", None, started)
+    return {"facts": facts}
+
+
+def k_archive_old_cvs(s: ChiefState) -> ChiefState:
+    """Archive pool CVs that waited longer than POOL_EXPIRE_DAYS (never deleted)."""
+    started = time.time()
+    limit = datetime.now() - timedelta(days=config.POOL_EXPIRE_DAYS)
+    archived = 0
+    for c in db.candidates_in(config.POOL_STATUSES):
+        try:
+            added = datetime.fromisoformat(c.created_at)
+        except ValueError:
+            continue
+        if added < limit and db.update_candidate(
+            c.id,
+            expect_status=c.status,
+            status="archived",
+            outcome="Archived after 6 months in the pool",
+        ):
+            db.log_event(c.id, "Chief of staff", "Archived the CV: it waited in the pool for more than 6 months.")
+            archived += 1
+    facts = dict(s["facts"])
+    facts["cvs_archived_after_6_months"] = archived
+    facts["cvs_waiting_in_pool"] = _count(config.POOL_STATUSES)
+    _record("chief-of-staff", "archive-old-cvs", None, started, note=f"{archived} archived")
     return {"facts": facts}
 
 
@@ -601,7 +639,13 @@ def _template_brief(f: dict) -> str:
                      f"Not shortlisted to confirm: {n['not_shortlisted_to_confirm']}. CVs that could not be read: "
                      f"{n['cvs_that_could_not_be_read']}. Emails waiting for release: {n['emails_waiting_for_release']}.")
     parts.append(f"{f['waiting_for_interview_results']} candidate(s) are waiting for an interview result, and "
-                 f"{f['new_cvs_not_read_yet']} new CV(s) are not read yet.")
+                 f"{f['new_cvs_not_read_yet']} new CV(s) are not read yet. {f.get('cvs_waiting_in_pool', 0)} CV(s) "
+                 f"are waiting in the pool.")
+    if f.get("open_vacancies"):
+        parts.append(f"{f['open_vacancies']} vacancy(ies) are open and "
+                     f"{f['candidates_suggested_for_a_vacancy']} candidate(s) are suggested for them.")
+    if f.get("cvs_archived_after_6_months"):
+        parts.append(f"{f['cvs_archived_after_6_months']} CV(s) were archived after 6 months in the pool.")
     parts.append(f"In the last 24 hours the AI employees read {last['cvs_read']} CV(s), drafted "
                  f"{last['invitations_drafted']} invitation(s) and issued {last['work_ids_issued']} work ID(s). "
                  f"{last['model_steps_fixed_after_a_check']} model step(s) needed a fix and "
@@ -629,17 +673,93 @@ def k_morning_brief(s: ChiefState) -> ChiefState:
 def _build_chief():
     g = StateGraph(ChiefState)
     g.add_node("read_run_logs", k_read_run_logs)
+    g.add_node("archive_old_cvs", k_archive_old_cvs)
     g.add_node("flag_stalled", k_flag_stalled)
     g.add_node("morning_brief", k_morning_brief)
     g.add_edge(START, "read_run_logs")
-    g.add_edge("read_run_logs", "flag_stalled")
+    g.add_edge("read_run_logs", "archive_old_cvs")
+    g.add_edge("archive_old_cvs", "flag_stalled")
     g.add_edge("flag_stalled", "morning_brief")
     g.add_edge("morning_brief", END)
     return g.compile()
 
 
+# =====================================================================================
+# Planner: reads live MongoDB interns via TalentHub, opens vacancies, suggests CVs
+# =====================================================================================
+class PlannerState(TypedDict, total=False):
+    intern_rows: list
+    sync: dict
+    found: dict
+    suggested: dict
+    error: str
+
+
+def p_sync_interns(s: PlannerState) -> PlannerState:
+    """Query live intern records directly from MongoDB via TalentHub (no SQLite mirror)."""
+    started = time.time()
+    _doing("planner", "Reading intern records from TalentHub (MongoDB)")
+    area_names = [a.name for a in db.active_areas()]
+    try:
+        rows = talent_hub.interns_with_area(area_names, limit=0)
+    except (talent_hub.TalentHubUnavailable, talent_hub.TalentHubAuthError) as exc:
+        _record("planner", "sync-interns", None, started, outcome="error", note=str(exc)[:300])
+        return {"intern_rows": [], "sync": {}, "error": str(exc)}
+    unknown = sum(1 for r in rows if not r.get("area"))
+    ending = sum(1 for r in rows if r.get("ending_soon") and r.get("area"))
+    summary = {"read": len(rows), "ending_soon": ending, "unknown_specialization": unknown}
+    note = f"{len(rows)} record(s) read from TalentHub: {ending} ending soon"
+    if unknown:
+        note += f", {unknown} unmapped"
+    _record("planner", "sync-interns", None, started, note=note)
+    return {"intern_rows": rows, "sync": summary}
+
+
+def p_find_vacancies(s: PlannerState) -> PlannerState:
+    started = time.time()
+    if s.get("error"):
+        return {"found": {"created": 0, "updated": 0, "closed": 0, "open": len(db.vacancies_in("open"))}}
+    _doing("planner", "Looking for places that are opening")
+    out = vacancies.find_and_update(intern_rows=s.get("intern_rows"))
+    _record(
+        "planner",
+        "find-vacancies",
+        None,
+        started,
+        note=f"{out['created']} new, {out['updated']} changed, {out['open']} open",
+    )
+    return {"found": out}
+
+
+def p_suggest(s: PlannerState) -> PlannerState:
+    started = time.time()
+    _doing("planner", "Suggesting candidates from the pool")
+    out = vacancies.suggest_for_open()
+    _record(
+        "planner",
+        "suggest-candidates",
+        None,
+        started,
+        note=f"{out['waiting_for_approval']} suggestion(s) waiting for HR officer",
+    )
+    return {"suggested": out}
+
+
+def _build_planner():
+    g = StateGraph(PlannerState)
+    g.add_node("sync_interns", p_sync_interns)
+    g.add_node("find_vacancies", p_find_vacancies)
+    g.add_node("suggest_candidates", p_suggest)
+    g.add_edge(START, "sync_interns")
+    g.add_edge("sync_interns", "find_vacancies")
+    g.add_edge("find_vacancies", "suggest_candidates")
+    g.add_edge("suggest_candidates", END)
+    return g.compile()
+
+
 GRAPHS = {"recruiter": _build_recruiter(), "coordinator": _build_coordinator(), "onboarding": _build_onboarding()}
 CHIEF_GRAPH = _build_chief()
+PLANNER_GRAPH = _build_planner()
 
 
 # =====================================================================================
@@ -647,6 +767,26 @@ CHIEF_GRAPH = _build_chief()
 # =====================================================================================
 def _model_down(e: Exception) -> None:
     NOTICE.update(text=str(e), at=db.now())
+
+
+def run_planner(wait: bool = True) -> dict:
+    """Query TalentHub/MongoDB, open vacancies for finishing interns, and suggest top pool CVs."""
+    if db.get_setting("paused") == "1":
+        return {"employee": "planner", "skipped": "paused"}
+    if not PLANNER_LOCK.acquire(blocking=wait, timeout=300 if wait else -1):
+        return {"employee": "planner", "skipped": "busy"}
+    try:
+        out = PLANNER_GRAPH.invoke({})
+        TEAM["planner"].update(
+            last_run=db.now(),
+            last_note="TalentHub could not be read"
+            if out.get("error")
+            else f"{out.get('found', {}).get('open', 0)} open vacancy(ies)",
+        )
+        return {"employee": "planner", **out}
+    finally:
+        TEAM["planner"].update(state="idle", doing="")
+        PLANNER_LOCK.release()
 
 
 def run_employee(key: str, limit: int | None = None, wait: bool = False) -> dict:
@@ -672,6 +812,9 @@ def run_employee(key: str, limit: int | None = None, wait: bool = False) -> dict
                 db.log_run(EMPLOYEES[key], "run", c.id, started, time.time() - started, "error", 0, repr(e)[:500])
                 db.add_flag(c.id, f"The {EMPLOYEES[key]} hit an error: {str(e)[:200]}", EMPLOYEES[key])
         TEAM[key].update(last_run=db.now(), last_note=f"{done} candidate(s) handled")
+        if key == "recruiter" and done:
+            # New CVs reached the pool, so top up suggestions for open vacancies immediately.
+            vacancies.suggest_for_open()
     finally:
         TEAM[key].update(state="idle", doing="")
         WORK_LOCK.release()

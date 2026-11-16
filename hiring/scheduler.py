@@ -18,6 +18,12 @@ def start() -> BackgroundScheduler:
     s = BackgroundScheduler(job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 60})
     for key in EMPLOYEES:
         plan = schedule(key)
+        if key == "planner":
+            if plan["daily_at"]:
+                h, m = plan["daily_at"].split(":")
+                s.add_job(flows.run_planner, CronTrigger(hour=int(h), minute=int(m)), kwargs={"wait": True},
+                          id=key, name=EMPLOYEES[key])
+            continue
         if key == "chief-of-staff":
             if plan["daily_at"]:
                 h, m = plan["daily_at"].split(":")

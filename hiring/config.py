@@ -58,6 +58,17 @@ STALLED_AFTER_HOURS = {
     "awaiting_result": 72, "on_hold": 168,
 }
 
+# ---- The CV pool ------------------------------------------------------------------
+POOL_MIN_SCORE = 50        # an area's ranked list only shows CVs scoring this or more for that area
+POOL_OTHER_AREAS = 3       # how many other good areas are shown for each CV
+POOL_EXPIRE_DAYS = 182     # CVs waiting in the pool longer than this (about 6 months) are archived
+
+# ---- Vacancies & TalentHub timezone -----------------------------------------------
+LOCAL_UTC_OFFSET_HOURS = 5.5   # Sri Lanka Standard Time (UTC+5:30)
+VACANCY_NOTICE_DAYS = 7        # a place opens this many days before an intern's end date
+VACANCY_LOOKBACK_DAYS = 14     # ignore historical interns who finished earlier than this window
+VACANCY_RESERVES = 2           # suggest this many candidates beyond the number of places
+
 # Interview slots: working days only, 45 minutes each.
 INTERVIEW_TIMES = ["09:30", "10:15", "11:00", "11:45", "14:00", "14:45", "15:30"]
 
@@ -66,6 +77,9 @@ SCHEDULER_ENABLED = os.environ.get("HR_SCHEDULER", "1") != "0"
 # ---- Statuses: label shown to people, chip colour, who acts next ----------------
 STATUSES = {
     "new":                   ("New CV", "gray", "Recruiter"),
+    "in_pool":               ("Waiting in pool", "gray", ""),
+    "no_area":               ("No matching area", "gray", ""),
+    "archived":              ("Archived", "gray", ""),
     "needs_person":          ("CV needs a person", "amber", "HR officer"),
     "needs_area":            ("Area needs a person", "amber", "HR officer"),
     "borderline":            ("Borderline score", "amber", "HR officer"),
@@ -87,6 +101,25 @@ STATUSES = {
 # Statuses where a person (the HR officer) must act.
 HR_STATUSES = {"needs_person", "needs_area", "borderline", "not_shortlisted_check"}
 RELEASE_STATUSES = {"invite_ready", "hold_note_ready", "reply_ready", "offer_ready"}
+# CVs waiting in the pool (not in the hiring flow yet). The HR officer invites from here.
+POOL_STATUSES = {"in_pool", "no_area"}
+# Statuses that are shown on the Pool page and not on the Candidates page.
+NOT_IN_HIRING = POOL_STATUSES | {"archived"}
+
+# ---- Live Email Sender (SMTP) -----------------------------------------------------
+# Defaults to disabled (outbox archive only) until enabled via env or HR Email Settings UI.
+SMTP_ENABLED = os.environ.get("HR_SMTP_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+SMTP_HOST = os.environ.get("HR_SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.environ.get("HR_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("HR_SMTP_USER", "").strip()
+SMTP_PASSWORD = os.environ.get("HR_SMTP_PASSWORD", "")
+SMTP_USE_TLS = os.environ.get("HR_SMTP_USE_TLS", "1").strip().lower() in ("1", "true", "yes")
+SMTP_USE_SSL = os.environ.get("HR_SMTP_USE_SSL", "0").strip().lower() in ("1", "true", "yes")
+SMTP_FROM_NAME = os.environ.get("HR_SMTP_FROM_NAME", "SLT Talent Acquisition").strip()
+SMTP_FROM_EMAIL = os.environ.get("HR_SMTP_FROM_EMAIL", "").strip()
+# Optional safe demo redirect: when set, outbound SMTP goes to this address instead of candidate email.
+SMTP_TEST_RECIPIENT = os.environ.get("HR_SMTP_TEST_RECIPIENT", "").strip()
+SMTP_TIMEOUT = float(os.environ.get("HR_SMTP_TIMEOUT", "15"))
 
 # ---- SLT TalentHub (external intern DB + read-only REST API) --------------------
 TALENT_HUB_MONGO_URI = os.environ.get("TALENT_HUB_MONGO_URI", "mongodb://127.0.0.1:27017")

@@ -122,7 +122,7 @@ To reset all data, stop the app and delete the `data` folder.
 
 Until access to the live **SLT TalentHub** API is configured, this branch provides a sample MongoDB database (`slt_talent_hub_sample.interns`) matching TalentHub's schema (`Trainee_ID`, `Trainee_Name`, `Training_StartDate`, `Training_EndDate`, `field_of_spec_name`) and a local Bearer-authenticated read-only mock API (`http://127.0.0.1:5050/api`, avoiding macOS AirPlay's default port `5000`).
 
-1. Ensure MongoDB is running locally on `127.0.0.1:27017` and seed 100 sample intern records:
+1. Ensure MongoDB is running locally on `127.0.0.1:27017` and seed 400 Sri Lankan IT-focused sample intern records:
 
 ```bash
 .venv/bin/python scripts/seed_talent_hub.py

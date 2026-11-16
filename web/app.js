@@ -21,7 +21,8 @@ let lastHTML = "";
 let current = { page: "", arg: "" };
 const UI = { showCv: false, showRuns: false, editDraft: null, editEmail: false, candFilter: "selected", candQuery: "",
              repliesTab: "waiting", showAll: "", files: [], uploadResults: null, areas: null,
-             internFilter: "all", internSpec: "", internQuery: "", interns: null, internsError: "" };
+             internFilter: "all", internSpec: "", internQuery: "", internPage: 1, internPageSize: 50,
+             internSortCol: "Trainee_ID", internSortDir: 1, interns: null, internsError: "" };
 
 async function api(path, { method = "GET", body, form } = {}) {
   const opt = { method, headers: { "X-Role": ROLE } };
@@ -512,7 +513,7 @@ function internPhase(r) {
 
 function filteredInterns(rows) {
   const q = UI.internQuery.trim().toLowerCase();
-  return rows.filter((r) => {
+  const out = rows.filter((r) => {
     if (UI.internFilter !== "all" && internPhase(r).key !== UI.internFilter) return false;
     if (UI.internSpec && r.field_of_spec_name !== UI.internSpec) return false;
     if (q) {
@@ -521,6 +522,42 @@ function filteredInterns(rows) {
     }
     return true;
   });
+  const col = UI.internSortCol;
+  const dir = UI.internSortDir;
+  out.sort((a, b) => String(a[col] ?? "").localeCompare(String(b[col] ?? ""), undefined, { numeric: true }) * dir);
+  return out;
+}
+
+function csvCell(v) {
+  const s = String(v ?? "");
+  const safe = /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+function exportInternsCsv(rows) {
+  const filtered = filteredInterns(rows);
+  const cols = ["Trainee_ID", "Trainee_Name", "Training_StartDate", "Training_EndDate", "field_of_spec_name"];
+  const lines = [cols.join(","), ...filtered.map((r) => cols.map((c) => csvCell(r[c])).join(","))];
+  const blob = new Blob([lines.join("\n") + "\n"], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "talenthub_interns.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast(`Exported ${filtered.length} intern(s) to talenthub_interns.csv.`);
+}
+
+function syncSpecChips() {
+  view.querySelectorAll("[data-act='intern-chip']").forEach((el) => {
+    el.classList.toggle("on", el.dataset.spec === UI.internSpec);
+  });
+  const sel = $("#intern-spec");
+  if (sel && sel.value !== UI.internSpec) sel.value = UI.internSpec;
+}
+
+function sortHeader(col, label) {
+  const arrow = UI.internSortCol === col ? (UI.internSortDir > 0 ? "▲" : "▼") : "";
+  return `<th><button type="button" class="sort-btn" data-act="intern-sort" data-col="${esc(col)}">${esc(label)}${arrow ? ` <span class="small">${arrow}</span>` : ""}</button></th>`;
 }
 
 function renderInternTable(rows) {
@@ -533,8 +570,21 @@ function renderInternTable(rows) {
     wrap.innerHTML = empty(rows.length ? "No interns match your filters." : "No interns found in TalentHub.");
     return;
   }
-  wrap.innerHTML = `<table class="t list"><thead><tr><th>Trainee ID</th><th>Name</th><th>Start Date (UTC)</th><th>End Date (UTC)</th><th>Specialization</th><th>Cohort</th><th></th></tr></thead><tbody>
-    ${shown.map((r) => {
+  const perPage = UI.internPageSize > 0 ? UI.internPageSize : shown.length;
+  const totalPages = Math.max(1, Math.ceil(shown.length / perPage));
+  if (UI.internPage > totalPages) UI.internPage = totalPages;
+  if (UI.internPage < 1) UI.internPage = 1;
+  const startIdx = (UI.internPage - 1) * perPage;
+  const pageRows = shown.slice(startIdx, startIdx + perPage);
+
+  wrap.innerHTML = `<table class="t list"><thead><tr>
+    ${sortHeader("Trainee_ID", "Trainee ID")}
+    ${sortHeader("Trainee_Name", "Name")}
+    ${sortHeader("Training_StartDate", "Start Date (UTC)")}
+    ${sortHeader("Training_EndDate", "End Date (UTC)")}
+    ${sortHeader("field_of_spec_name", "Specialization")}
+    <th>Cohort</th><th></th></tr></thead><tbody>
+    ${pageRows.map((r) => {
       const ph = internPhase(r);
       const meta = [r.Trainee_Email, r.Institute].filter(Boolean).join(" · ");
       return `<tr class="click" data-act="intern-detail" data-id="${esc(r.Trainee_ID)}">
@@ -546,7 +596,14 @@ function renderInternTable(rows) {
         <td>${tag(ph.label, ph.cls)}</td>
         <td style="text-align:right"><button type="button" class="btn small" data-act="intern-detail" data-id="${esc(r.Trainee_ID)}">View</button></td>
       </tr>`;
-    }).join("")}</tbody></table>`;
+    }).join("")}</tbody></table>
+    <div class="pager">
+      <span class="small muted">Rows ${startIdx + 1}-${startIdx + pageRows.length} of ${shown.length} (Page ${UI.internPage} of ${totalPages})</span>
+      <span class="spacer"></span>
+      <button type="button" class="btn small" data-act="intern-page" data-dir="-1" ${UI.internPage <= 1 ? "disabled" : ""}>Previous</button>
+      <button type="button" class="btn small" data-act="intern-page" data-dir="1" ${UI.internPage >= totalPages ? "disabled" : ""}>Next</button>
+      <button type="button" class="btn small" data-act="intern-pagesize">${UI.internPageSize > 0 ? `Show all ${shown.length}` : "50 per page"}</button>
+    </div>`;
 }
 
 async function openInternDetail(id) {
@@ -601,7 +658,10 @@ async function pInterns() {
     ? notice("error", "TalentHub API is not reachable.", UI.internsError + " Run ./start_talent_hub.sh in another terminal.", `<button type="button" class="btn small" data-act="intern-refresh">Retry</button>`)
     : notice("ok", "Connected to SLT TalentHub (MongoDB sample).", `${rows.length} intern record(s) loaded from ${th?.url || "TalentHub API"}.`, `<button type="button" class="btn small" data-act="intern-refresh">Refresh</button>`);
 
-  const specs = Array.from(new Set(rows.map((r) => r.field_of_spec_name).filter(Boolean))).sort();
+  const specCounts = {};
+  rows.forEach((r) => { if (r.field_of_spec_name) specCounts[r.field_of_spec_name] = (specCounts[r.field_of_spec_name] || 0) + 1; });
+  const specs = Object.keys(specCounts).sort();
+  const topSpecs = Object.entries(specCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8);
   if (UI.internSpec && !specs.includes(UI.internSpec)) UI.internSpec = "";
   const activeCount = rows.filter((r) => internPhase(r).key === "active").length;
   const stats = `
@@ -611,14 +671,20 @@ async function pInterns() {
       <div class="intern-stat"><b>${esc(specs.length)}</b><span>Specializations</span></div>
     </div>`;
 
+  const specChips = topSpecs.length ? `<div class="spec-bar">
+    <button type="button" class="spec-chip ${UI.internSpec === "" ? "on" : ""}" data-act="intern-chip" data-spec="">All (${esc(rows.length)})</button>
+    ${topSpecs.map(([sp, cnt]) => `<button type="button" class="spec-chip ${UI.internSpec === sp ? "on" : ""}" data-act="intern-chip" data-spec="${esc(sp)}">${esc(sp)} (${esc(cnt)})</button>`).join("")}
+  </div>` : "";
+
   const tabs = [["all", "All"], ["active", "Active"], ["completed", "Completed"], ["upcoming", "Upcoming"]];
   setView(`${banner}${stats}
-    <div class="box">${boxHead("Intern records", `<span class="small muted" id="intern-shown"></span>`)}
+    <div class="box">${boxHead("Intern records", `<span class="small muted" id="intern-shown"></span><button type="button" class="btn small" data-act="intern-csv" ${rows.length ? "" : "disabled"}>Export CSV</button>`)}
+      ${specChips}
       <div class="filters">
         <div class="tabs">${tabs.map(([k, l]) => `<button type="button" class="${UI.internFilter === k ? "on" : ""}" data-act="intern-filter" data-f="${k}">${esc(l)}</button>`).join("")}</div>
         <select class="spec-select" id="intern-spec" aria-label="Filter by specialization">
           <option value="">All specializations</option>
-          ${specs.map((sp) => `<option value="${esc(sp)}" ${UI.internSpec === sp ? "selected" : ""}>${esc(sp)}</option>`).join("")}
+          ${specs.map((sp) => `<option value="${esc(sp)}" ${UI.internSpec === sp ? "selected" : ""}>${esc(sp)} (${esc(specCounts[sp])})</option>`).join("")}
         </select>
         <input type="search" class="search" id="intern-q" placeholder="Search ID, name, specialization" value="${esc(UI.internQuery)}">
       </div>
@@ -626,8 +692,8 @@ async function pInterns() {
     </div>`);
 
   renderInternTable(rows);
-  $("#intern-spec").onchange = (e) => { UI.internSpec = e.target.value; renderInternTable(rows); };
-  $("#intern-q").oninput = (e) => { UI.internQuery = e.target.value; renderInternTable(rows); };
+  $("#intern-spec").onchange = (e) => { UI.internSpec = e.target.value; UI.internPage = 1; syncSpecChips(); renderInternTable(rows); };
+  $("#intern-q").oninput = (e) => { UI.internQuery = e.target.value; UI.internPage = 1; renderInternTable(rows); };
 }
 
 // ================================================================ Interviewer pages
@@ -760,9 +826,27 @@ const ACTS = {
   "intern-refresh": () => { lastHTML = ""; pInterns(); },
   "intern-filter": (b) => {
     UI.internFilter = b.dataset.f;
+    UI.internPage = 1;
     view.querySelectorAll("[data-act='intern-filter']").forEach((el) => el.classList.toggle("on", el.dataset.f === UI.internFilter));
     if (UI.interns) renderInternTable(UI.interns);
   },
+  "intern-chip": (b) => {
+    const picked = b.dataset.spec;
+    UI.internSpec = UI.internSpec === picked ? "" : picked;
+    UI.internPage = 1;
+    syncSpecChips();
+    if (UI.interns) renderInternTable(UI.interns);
+  },
+  "intern-sort": (b) => {
+    const col = b.dataset.col;
+    if (UI.internSortCol === col) UI.internSortDir *= -1;
+    else { UI.internSortCol = col; UI.internSortDir = 1; }
+    UI.internPage = 1;
+    if (UI.interns) renderInternTable(UI.interns);
+  },
+  "intern-page": (b) => { UI.internPage += +b.dataset.dir; if (UI.interns) renderInternTable(UI.interns); },
+  "intern-pagesize": () => { UI.internPageSize = UI.internPageSize > 0 ? 0 : 50; UI.internPage = 1; if (UI.interns) renderInternTable(UI.interns); },
+  "intern-csv": () => { if (UI.interns) exportInternsCsv(UI.interns); },
   "intern-detail": (b) => openInternDetail(b.dataset.id),
   "save-result": async () => {
     const picked = document.querySelector('input[name="result"]:checked');

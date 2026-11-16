@@ -12,6 +12,7 @@ and exposes decrypted records through a Bearer-authenticated read-only HTTP API
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -421,14 +422,38 @@ def get_intern(identifier: str) -> dict[str, Any] | None:
 
 
 # ---- Deterministic sample generator & seeder ---------------------------------------
-_FIRST_NAMES = (
-    "Kamal", "Nimali", "Kasun", "Dilani", "Tharindu", "Sanduni",
-    "Nuwan", "Chathuri", "Ravindu", "Ishara", "Dinuka", "Hashini",
-    "Arjun", "Priya", "Vikram", "Ananya", "Daniel", "Emily",
-)
-_LAST_NAMES = (
-    "Perera", "Silva", "Fernando", "Jayawardena", "Bandara", "Rajapaksa",
-    "Wickramasinghe", "Senanayake", "Gunasekara", "Dissanayake", "Ranasinghe", "Karunaratne",
+_NAME_COMMUNITIES = (
+    (
+        (
+            "Kamal", "Nimali", "Kasun", "Dilani", "Tharindu", "Sanduni",
+            "Nuwan", "Chathuri", "Ravindu", "Ishara", "Dinuka", "Hashini",
+            "Kavinda", "Nethmi", "Sahan", "Hasini",
+        ),
+        (
+            "Perera", "Silva", "Fernando", "Jayawardena", "Bandara", "Rajapaksa",
+            "Wickramasinghe", "Senanayake", "Gunasekara", "Dissanayake",
+            "Ranasinghe", "Karunaratne", "Ekanayake", "Herath",
+        ),
+    ),
+    (
+        (
+            "Kajanathan", "Aarani", "Mathushan", "Nirosha", "Senthuran", "Ashwini",
+            "Praveen", "Divya", "Luxshan", "Keerthana", "Harish", "Pavithra",
+        ),
+        (
+            "Sivakumar", "Subramaniam", "Rajaratnam", "Selvarajah", "Yogeswaran",
+            "Balasubramaniam", "Nadarajah", "Shanmuganathan", "Krishnamoorthy",
+            "Jegatheesan", "Vigneswaran",
+        ),
+    ),
+    (
+        ("Mohamed", "Fathima", "Aashiq", "Zainab", "Rizwan", "Amina", "Shafraz", "Nadia"),
+        ("Farhan", "Ahamed", "Nazeer", "Hameed", "Ibrahim", "Ismail", "Marikar", "Cader"),
+    ),
+    (
+        ("Shenal", "Natasha", "Dilan", "Tanya", "Rehan", "Melissa"),
+        ("De Mel", "Jansen", "Van Dort", "Ludowyke", "Fonseka", "Rodrigo"),
+    ),
 )
 _SAMPLE_START_DATES = (
     "2025-01-01T00:00:00.000Z",
@@ -441,32 +466,60 @@ _SAMPLE_START_DATES = (
     "2026-11-02T00:00:00.000Z",
 )
 _COHORT_DAYS = (90, 180, 180, 270, 365)
+# Weighted towards IT & engineering specializations (~90% IT, ~10% IT-adjacent), interleaved for variety.
+_WEIGHTED_SPECS = (
+    "Software Engineering",
+    "Network Engineering",
+    "AI/ML",
+    "Web Development",
+    "Backend Development",
+    "Cybersecurity",
+    "DevOps",
+    "Data Engineering",
+    "Software Engineering",
+    "Flutter",
+    "Data Analytics",
+    "UI/UX Design",
+    "Software Quality Assurance",
+    "MLOps",
+    "Web Development",
+    "Network Engineering",
+    "Backend Development",
+    "Networking",
+    "Business Analysis",
+    "Software Engineering",
+    "Project Management",
+)
 
 
-def _sample_specializations() -> list[str]:
-    specs = ["Software Engineering", "Network Engineering"]
-    try:
-        for area in json.loads(config.AREAS_FILE.read_text(encoding="utf-8")):
-            name = str(area.get("name", "")).strip()
-            if name and name not in specs:
-                specs.append(name)
-    except OSError:
-        pass
-    return specs
+def _sri_lankan_name_pool() -> list[str]:
+    reserved = {"Kamal Perera", "Nimali Silva"}
+    groups: list[list[str]] = []
+    for firsts, lasts in _NAME_COMMUNITIES:
+        # Place last names outer and step by a prime stride > len(firsts) so adjacent rows vary both names.
+        raw = [f"{fn} {ln}" for ln in lasts for fn in firsts if f"{fn} {ln}" not in reserved]
+        n = len(raw)
+        stride = next(s for s in (19, 23, 29, 31, 17, 13, 11, 7, 5, 1) if s < n and math.gcd(s, n) == 1)
+        ordered = [raw[(idx * stride) % n] for idx in range(n)]
+        groups.append(ordered)
+
+    # Interleave Sinhala, Tamil, Muslim, and Burgher names in weighted 3:2:1:1 turns.
+    pattern = (0, 0, 1, 0, 2, 1, 3)
+    cursors = [0] * len(groups)
+    pool: list[str] = []
+    while any(cursors[g] < len(groups[g]) for g in range(len(groups))):
+        for g in pattern:
+            if cursors[g] < len(groups[g]):
+                pool.append(groups[g][cursors[g]])
+                cursors[g] += 1
+    return pool
 
 
-def generate_sample_interns(count: int = 100) -> list[dict[str, Any]]:
-    """Build deterministic sample intern records matching TalentHub's exact fields."""
+def generate_sample_interns(count: int = 400) -> list[dict[str, Any]]:
+    """Build deterministic Sri Lankan, IT-focused sample intern records."""
     if count < 1:
         raise ValueError("count must be at least 1.")
-    specs = _sample_specializations()
-    reserved = {"Kamal Perera", "Nimali Silva"}
-    names_pool = [
-        f"{fn} {ln}"
-        for fn in _FIRST_NAMES
-        for ln in _LAST_NAMES
-        if f"{fn} {ln}" not in reserved
-    ]
+    names_pool = _sri_lankan_name_pool()
     rows: list[dict[str, Any]] = []
     pool_idx = 0
     for i in range(count):
@@ -484,15 +537,14 @@ def generate_sample_interns(count: int = 100) -> list[dict[str, Any]]:
             spec = "Network Engineering"
         else:
             if pool_idx < len(names_pool):
-                # Coprime stride (7) distributes names evenly across cohorts; gcd(7, 214) == 1.
-                name = names_pool[(pool_idx * 7) % len(names_pool)]
+                name = names_pool[pool_idx]
             else:
                 name = f"{names_pool[pool_idx % len(names_pool)]} {i + 1}"
             pool_idx += 1
             base_start = parse_utc_date(_SAMPLE_START_DATES[i % len(_SAMPLE_START_DATES)])
-            start_dt = base_start + timedelta(days=(i // len(_SAMPLE_START_DATES)) * 3)
+            start_dt = base_start + timedelta(days=(i // len(_SAMPLE_START_DATES)))
             end_dt = start_dt + timedelta(days=_COHORT_DAYS[i % len(_COHORT_DAYS)])
-            spec = specs[i % len(specs)]
+            spec = _WEIGHTED_SPECS[i % len(_WEIGHTED_SPECS)]
 
         rows.append({
             "Trainee_ID": trainee_id,
@@ -504,7 +556,7 @@ def generate_sample_interns(count: int = 100) -> list[dict[str, Any]]:
     return rows
 
 
-def seed_sample_interns(count: int = 100, reset: bool = False) -> dict[str, Any]:
+def seed_sample_interns(count: int = 400, reset: bool = False) -> dict[str, Any]:
     """Ensure schema/indexes exist in MongoDB and idempotently seed sample interns."""
     rows = generate_sample_interns(count)
     info = ensure_collection()

@@ -49,7 +49,7 @@ def main() -> int:
         return check()
     if a.command == "seed-talent-hub":
         try:
-            res = talent_hub.seed_sample_interns(100)
+            res = talent_hub.seed_sample_interns(400)
         except talent_hub.TalentHubUnavailable as exc:
             print(f"Error: {exc}")
             print(f"Check TALENT_HUB_MONGO_URI ({config.TALENT_HUB_MONGO_URI}) and ensure mongod is running.")
@@ -60,7 +60,7 @@ def main() -> int:
         return 0
     if a.command == "interns":
         try:
-            rows = talent_hub.list_interns(limit=200)
+            rows = talent_hub.list_interns(limit=1000)
         except (talent_hub.TalentHubUnavailable, talent_hub.TalentHubAuthError) as exc:
             print(f"Error: {exc}")
             print("Start the local mock server with ./start_talent_hub.sh or check TALENT_HUB_API_URL / TALENT_HUB_API_TOKEN.")

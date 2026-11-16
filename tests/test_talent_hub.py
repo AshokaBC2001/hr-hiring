@@ -201,14 +201,20 @@ def test_health_fails_gracefully_when_api_unreachable(monkeypatch):
     assert h["detail"]
 
 
-def test_generate_sample_interns_builds_100_valid_sithuli_records():
-    rows = talent_hub.generate_sample_interns(100)
-    assert len(rows) == 100
+def test_generate_sample_interns_builds_400_sri_lankan_it_records():
+    rows = talent_hub.generate_sample_interns()
+    assert len(rows) == 400
     assert rows[0]["Trainee_ID"] == "1001"
-    assert rows[-1]["Trainee_ID"] == "1100"
-    assert len({r["Trainee_ID"] for r in rows}) == 100
-    assert len({r["Trainee_Name"] for r in rows}) == 100
+    assert rows[-1]["Trainee_ID"] == "1400"
+    assert len({r["Trainee_ID"] for r in rows}) == 400
+    assert len({r["Trainee_Name"] for r in rows}) == 400
 
+    it_specs = {
+        "Software Engineering", "Network Engineering", "AI/ML", "DevOps", "MLOps",
+        "Flutter", "Web Development", "Backend Development", "Data Analytics",
+        "Data Engineering", "Cybersecurity", "Software Quality Assurance",
+        "UI/UX Design", "Networking",
+    }
     expected_keys = {
         "Trainee_ID",
         "Trainee_Name",
@@ -216,20 +222,30 @@ def test_generate_sample_interns_builds_100_valid_sithuli_records():
         "Training_EndDate",
         "field_of_spec_name",
     }
+    it_count = 0
     for row in rows:
         assert set(row.keys()) == expected_keys
         assert row["Trainee_Name"].strip()
+        assert not any(ch.isdigit() for ch in row["Trainee_Name"])
         assert row["field_of_spec_name"].strip()
+        if row["field_of_spec_name"] in it_specs:
+            it_count += 1
         assert row["Training_StartDate"].endswith("T00:00:00.000Z")
         assert row["Training_EndDate"].endswith("T00:00:00.000Z")
         assert talent_hub.parse_utc_date(row["Training_EndDate"]) > talent_hub.parse_utc_date(row["Training_StartDate"])
 
+    assert it_count >= 340  # >= 85% IT-focused
+    kamal = next(r for r in rows if r["Trainee_ID"] == "1042")
+    nimali = next(r for r in rows if r["Trainee_ID"] == "1043")
+    assert kamal["Trainee_Name"] == "Kamal Perera" and kamal["field_of_spec_name"] == "Software Engineering"
+    assert nimali["Trainee_Name"] == "Nimali Silva" and nimali["field_of_spec_name"] == "Network Engineering"
+
 
 def test_seed_sample_interns_is_idempotent(fake_mongo):
-    first = talent_hub.seed_sample_interns(100)
-    second = talent_hub.seed_sample_interns(100)
-    assert first["upserted"] == 100 and first["total"] == 100
-    assert second["upserted"] == 0 and second["modified"] == 0 and second["total"] == 100
+    first = talent_hub.seed_sample_interns()
+    second = talent_hub.seed_sample_interns()
+    assert first["upserted"] == 400 and first["total"] == 400
+    assert second["upserted"] == 0 and second["modified"] == 0 and second["total"] == 400
     assert {idx["name"] for idx in fake_mongo.indexes} >= {"Trainee_ID_1", "field_of_spec_name_1", "Training_EndDate_1"}
 
     reset_res = talent_hub.seed_sample_interns(100, reset=True)
@@ -410,6 +426,7 @@ def test_web_static_exposes_interns_page(tmp_path, monkeypatch):
             assert js.status_code == 200
             assert css.status_code == 200
             assert '"/api/interns' in js.text and "pInterns" in js.text
-            assert ".intern-stats" in css.text
+            assert "exportInternsCsv" in js.text and "internPage" in js.text
+            assert ".intern-stats" in css.text and ".spec-chip" in css.text and ".pager" in css.text
     finally:
         llm.set_backend(None)

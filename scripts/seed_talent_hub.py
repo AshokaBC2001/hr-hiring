@@ -19,7 +19,7 @@ from hiring import config, talent_hub  # noqa: E402
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Seed sample SLT TalentHub interns into MongoDB")
-    ap.add_argument("--count", type=int, default=100, help="Number of sample intern records to create")
+    ap.add_argument("--count", type=int, default=400, help="Number of sample intern records to create")
     ap.add_argument("--reset", action="store_true", help="Clear existing records before seeding")
     args = ap.parse_args()
 

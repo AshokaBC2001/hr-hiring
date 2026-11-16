@@ -11,10 +11,11 @@ and exposes decrypted records through a Bearer-authenticated read-only HTTP API
 """
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -417,3 +418,97 @@ def get_intern(identifier: str) -> dict[str, Any] | None:
         return None
     _raise_for_api_error(resp)
     return normalize_intern(resp.json())
+
+
+# ---- Deterministic sample generator & seeder ---------------------------------------
+_FIRST_NAMES = (
+    "Kamal", "Nimali", "Kasun", "Dilani", "Tharindu", "Sanduni",
+    "Nuwan", "Chathuri", "Ravindu", "Ishara", "Dinuka", "Hashini",
+    "Arjun", "Priya", "Vikram", "Ananya", "Daniel", "Emily",
+)
+_LAST_NAMES = (
+    "Perera", "Silva", "Fernando", "Jayawardena", "Bandara", "Rajapaksa",
+    "Wickramasinghe", "Senanayake", "Gunasekara", "Dissanayake", "Ranasinghe", "Karunaratne",
+)
+_SAMPLE_START_DATES = (
+    "2025-01-01T00:00:00.000Z",
+    "2025-02-15T00:00:00.000Z",
+    "2025-07-01T00:00:00.000Z",
+    "2026-01-05T00:00:00.000Z",
+    "2026-05-19T00:00:00.000Z",
+    "2026-07-01T00:00:00.000Z",
+    "2026-09-01T00:00:00.000Z",
+    "2026-11-02T00:00:00.000Z",
+)
+_COHORT_DAYS = (90, 180, 180, 270, 365)
+
+
+def _sample_specializations() -> list[str]:
+    specs = ["Software Engineering", "Network Engineering"]
+    try:
+        for area in json.loads(config.AREAS_FILE.read_text(encoding="utf-8")):
+            name = str(area.get("name", "")).strip()
+            if name and name not in specs:
+                specs.append(name)
+    except OSError:
+        pass
+    return specs
+
+
+def generate_sample_interns(count: int = 100) -> list[dict[str, Any]]:
+    """Build deterministic sample intern records matching TalentHub's exact fields."""
+    if count < 1:
+        raise ValueError("count must be at least 1.")
+    specs = _sample_specializations()
+    reserved = {"Kamal Perera", "Nimali Silva"}
+    names_pool = [
+        f"{fn} {ln}"
+        for fn in _FIRST_NAMES
+        for ln in _LAST_NAMES
+        if f"{fn} {ln}" not in reserved
+    ]
+    rows: list[dict[str, Any]] = []
+    pool_idx = 0
+    for i in range(count):
+        trainee_id = str(1001 + i)
+        if trainee_id == "1042":
+            # Match Sithuli's API spec example records for 1042 and 1043.
+            name = "Kamal Perera"
+            start_dt = parse_utc_date("2025-01-01T00:00:00.000Z")
+            end_dt = parse_utc_date("2025-06-30T00:00:00.000Z")
+            spec = "Software Engineering"
+        elif trainee_id == "1043":
+            name = "Nimali Silva"
+            start_dt = parse_utc_date("2025-02-15T00:00:00.000Z")
+            end_dt = parse_utc_date("2025-08-15T00:00:00.000Z")
+            spec = "Network Engineering"
+        else:
+            if pool_idx < len(names_pool):
+                # Coprime stride (7) distributes names evenly across cohorts; gcd(7, 214) == 1.
+                name = names_pool[(pool_idx * 7) % len(names_pool)]
+            else:
+                name = f"{names_pool[pool_idx % len(names_pool)]} {i + 1}"
+            pool_idx += 1
+            base_start = parse_utc_date(_SAMPLE_START_DATES[i % len(_SAMPLE_START_DATES)])
+            start_dt = base_start + timedelta(days=(i // len(_SAMPLE_START_DATES)) * 3)
+            end_dt = start_dt + timedelta(days=_COHORT_DAYS[i % len(_COHORT_DAYS)])
+            spec = specs[i % len(specs)]
+
+        rows.append({
+            "Trainee_ID": trainee_id,
+            "Trainee_Name": name,
+            "Training_StartDate": format_utc_date(start_dt),
+            "Training_EndDate": format_utc_date(end_dt),
+            "field_of_spec_name": spec,
+        })
+    return rows
+
+
+def seed_sample_interns(count: int = 100, reset: bool = False) -> dict[str, Any]:
+    """Ensure schema/indexes exist in MongoDB and idempotently seed sample interns."""
+    rows = generate_sample_interns(count)
+    info = ensure_collection()
+    if reset:
+        _get_collection().delete_many({})
+    res = upsert_interns(rows)
+    return {**info, **res}

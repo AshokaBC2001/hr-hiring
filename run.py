@@ -11,7 +11,7 @@ import json
 import sys
 import time
 
-from hiring import config, db, flows, llm, actions
+from hiring import config, db, flows, llm, actions, talent_hub
 from hiring.checks import parse_json_object
 
 
@@ -40,10 +40,24 @@ def check() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="HR Hiring helpers")
-    ap.add_argument("command", choices=["check", "samples", "once", "brief", "status"])
+    ap.add_argument(
+        "command",
+        choices=["check", "samples", "once", "brief", "status", "seed-talent-hub", "interns"],
+    )
     a = ap.parse_args()
     if a.command == "check":
         return check()
+    if a.command == "seed-talent-hub":
+        res = talent_hub.seed_sample_interns(100)
+        print(f"Seeded {res['db']}.{res['collection']}: total={res['total']} (upserted={res['upserted']}, modified={res['modified']})")
+        talent_hub.close()
+        return 0
+    if a.command == "interns":
+        rows = talent_hub.list_interns(limit=200)
+        for r in rows:
+            print(f"{r['Trainee_ID']:6}  {r['Trainee_Name']:24} {r['Training_StartDate']} -> {r['Training_EndDate']}  {r['field_of_spec_name']}")
+        print(f"Total shown: {len(rows)}")
+        return 0
     db.setup()
     if a.command == "samples":
         for r in actions.add_samples():

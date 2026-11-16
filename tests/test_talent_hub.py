@@ -197,3 +197,39 @@ def test_health_fails_gracefully_when_api_unreachable(monkeypatch):
     h = talent_hub.health(force=True)
     assert h["ok"] is False
     assert h["detail"]
+
+
+def test_generate_sample_interns_builds_100_valid_sithuli_records():
+    rows = talent_hub.generate_sample_interns(100)
+    assert len(rows) == 100
+    assert rows[0]["Trainee_ID"] == "1001"
+    assert rows[-1]["Trainee_ID"] == "1100"
+    assert len({r["Trainee_ID"] for r in rows}) == 100
+    assert len({r["Trainee_Name"] for r in rows}) == 100
+
+    expected_keys = {
+        "Trainee_ID",
+        "Trainee_Name",
+        "Training_StartDate",
+        "Training_EndDate",
+        "field_of_spec_name",
+    }
+    for row in rows:
+        assert set(row.keys()) == expected_keys
+        assert row["Trainee_Name"].strip()
+        assert row["field_of_spec_name"].strip()
+        assert row["Training_StartDate"].endswith("T00:00:00.000Z")
+        assert row["Training_EndDate"].endswith("T00:00:00.000Z")
+        assert talent_hub.parse_utc_date(row["Training_EndDate"]) > talent_hub.parse_utc_date(row["Training_StartDate"])
+
+
+def test_seed_sample_interns_is_idempotent(fake_mongo):
+    first = talent_hub.seed_sample_interns(100)
+    second = talent_hub.seed_sample_interns(100)
+    assert first["upserted"] == 100 and first["total"] == 100
+    assert second["upserted"] == 0 and second["modified"] == 0 and second["total"] == 100
+    assert {idx["name"] for idx in fake_mongo.indexes} >= {"Trainee_ID_1", "field_of_spec_name_1", "Training_EndDate_1"}
+
+    reset_res = talent_hub.seed_sample_interns(100, reset=True)
+    assert reset_res["total"] == 100
+    assert talent_hub.mongo_get_intern("1042") is not None

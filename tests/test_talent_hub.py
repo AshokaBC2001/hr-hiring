@@ -7,11 +7,13 @@ from pathlib import Path
 import httpx
 import pytest
 from bson import ObjectId
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from fake_model import FakeModel  # noqa: E402
 from fake_talent_hub import FakeInternCollection  # noqa: E402
-from hiring import config, talent_hub  # noqa: E402
+from hiring import config, db, llm, talent_hub  # noqa: E402
 
 
 @pytest.fixture()
@@ -233,3 +235,114 @@ def test_seed_sample_interns_is_idempotent(fake_mongo):
     reset_res = talent_hub.seed_sample_interns(100, reset=True)
     assert reset_res["total"] == 100
     assert talent_hub.mongo_get_intern("1042") is not None
+
+
+def test_api_mock_talenthub_auth_readonly_and_lookup(fake_mongo, monkeypatch):
+    from hiring import talent_hub_mock
+
+    monkeypatch.setattr(config, "TALENT_HUB_API_TOKEN", "test-token")
+    talent_hub.seed_sample_interns(100)
+    mock_client = TestClient(talent_hub_mock.app)
+
+    assert mock_client.get("/api/interns").status_code == 401
+    assert mock_client.get("/api/interns", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+    auth = {"Authorization": "Bearer test-token"}
+    r_all = mock_client.get("/api/interns", headers=auth)
+    assert r_all.status_code == 200
+    rows = r_all.json()
+    assert len(rows) == 100
+    assert rows[0]["Training_StartDate"].endswith("T00:00:00.000Z")
+
+    r_one = mock_client.get("/api/interns/1042", headers=auth)
+    assert r_one.status_code == 200
+    kamal = r_one.json()
+    assert kamal["Trainee_ID"] == "1042" and kamal["Trainee_Name"] == "Kamal Perera"
+    assert kamal["Training_StartDate"] == "2025-01-01T00:00:00.000Z"
+    assert kamal["field_of_spec_name"] == "Software Engineering"
+
+    r_oid = mock_client.get(f"/api/interns/{kamal['_id']}", headers=auth)
+    assert r_oid.status_code == 200 and r_oid.json()["Trainee_ID"] == "1042"
+    assert mock_client.get("/api/interns/9999", headers=auth).status_code == 404
+
+    assert mock_client.post("/api/interns", headers=auth, json={}).status_code == 405
+    assert mock_client.put("/api/interns/1042", headers=auth, json={}).status_code == 405
+    assert mock_client.delete("/api/interns/1042", headers=auth).status_code == 405
+
+
+def test_api_hr_hiring_interns_and_state_integration(fake_mongo, tmp_path, monkeypatch):
+    from hiring import talent_hub_mock
+    from hiring.server import app
+
+    monkeypatch.setattr(config, "SCHEDULER_ENABLED", False)
+    monkeypatch.setattr(config, "TALENT_HUB_API_URL", "http://talenthub.local/api")
+    monkeypatch.setattr(config, "TALENT_HUB_API_TOKEN", "test-token")
+    db.setup(tmp_path / "data")
+    llm.set_backend(FakeModel())
+    talent_hub.seed_sample_interns(100)
+
+    mock_client = TestClient(talent_hub_mock.app)
+
+    def bridge(request: httpx.Request) -> httpx.Response:
+        # Simulate a separate TalentHub server process expecting "test-token".
+        saved = config.TALENT_HUB_API_TOKEN
+        config.TALENT_HUB_API_TOKEN = "test-token"
+        try:
+            resp = mock_client.request(
+                request.method,
+                request.url.raw_path.decode("ascii"),
+                headers=dict(request.headers),
+            )
+        finally:
+            config.TALENT_HUB_API_TOKEN = saved
+        return httpx.Response(resp.status_code, content=resp.content, headers=dict(resp.headers))
+
+    talent_hub.set_http_transport(httpx.MockTransport(bridge))
+    try:
+        with TestClient(app) as client:
+            state = client.get("/api/state").json()
+            assert state["talent_hub"]["ok"] is True and state["talent_hub"]["count"] == 100
+
+            r_list = client.get("/api/interns?specialization=Software%20Engineering")
+            assert r_list.status_code == 200
+            data = r_list.json()
+            assert data["total"] == len(data["interns"]) and data["total"] > 0
+            assert all(x["field_of_spec_name"] == "Software Engineering" for x in data["interns"])
+
+            r_q = client.get("/api/interns?q=Kamal&limit=5")
+            assert r_q.status_code == 200
+            assert any(x["Trainee_ID"] == "1042" for x in r_q.json()["interns"])
+
+            r_one = client.get("/api/interns/1042")
+            assert r_one.status_code == 200 and r_one.json()["Trainee_Name"] == "Kamal Perera"
+            assert client.get("/api/interns/9999").status_code == 404
+
+            # Bad bearer token surfaces as 502 without crashing /api/state.
+            monkeypatch.setattr(config, "TALENT_HUB_API_TOKEN", "bad-token")
+            assert client.get("/api/interns").status_code == 502
+            assert client.get("/api/state").status_code == 200
+    finally:
+        talent_hub.set_http_transport(None)
+        llm.set_backend(None)
+
+
+def test_api_hr_hiring_interns_offline_returns_503(tmp_path, monkeypatch):
+    from hiring.server import app
+
+    monkeypatch.setattr(config, "SCHEDULER_ENABLED", False)
+    monkeypatch.setattr(config, "TALENT_HUB_API_URL", "http://127.0.0.1:59999/api")
+    monkeypatch.setattr(config, "TALENT_HUB_TIMEOUT_MS", 200)
+    db.setup(tmp_path / "data")
+    llm.set_backend(FakeModel())
+    talent_hub.close()
+    try:
+        with TestClient(app) as client:
+            st = client.get("/api/state")
+            assert st.status_code == 200
+            assert st.json()["talent_hub"]["ok"] is False
+
+            res = client.get("/api/interns")
+            assert res.status_code == 503 and "detail" in res.json()
+            assert client.get("/api/interns/1042").status_code == 503
+    finally:
+        llm.set_backend(None)

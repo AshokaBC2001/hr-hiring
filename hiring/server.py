@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
-from . import actions, config, db, flows, llm, scheduler
+from . import actions, config, db, flows, llm, scheduler, talent_hub
 from .employees import EMPLOYEES, lessons, role_summary, routines, schedule
 
 VERSION = "1.0"
@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
         scheduler.start()
     yield
     scheduler.stop()
+    talent_hub.close()
 
 
 app = FastAPI(title="HR Hiring", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -49,6 +50,16 @@ async def same_site_only(request: Request, call_next):
 @app.exception_handler(actions.ActionError)
 async def action_error(request: Request, exc: actions.ActionError):
     return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.exception_handler(talent_hub.TalentHubUnavailable)
+async def talent_hub_unavailable(request: Request, exc: talent_hub.TalentHubUnavailable):
+    return JSONResponse({"detail": str(exc)}, status_code=503)
+
+
+@app.exception_handler(talent_hub.TalentHubAuthError)
+async def talent_hub_auth_error(request: Request, exc: talent_hub.TalentHubAuthError):
+    return JSONResponse({"detail": str(exc)}, status_code=502)
 
 
 def _role(request: Request) -> str:
@@ -144,7 +155,8 @@ def state():
         areas = [a.name for a in s.scalars(select(db.Area).where(db.Area.active.is_(True)).order_by(db.Area.id))]
     hr_count = sum(counts.get(k, 0) for k in config.HR_STATUSES)
     return {
-        "model": llm.health(), "notice": flows.NOTICE, "paused": db.get_setting("paused") == "1",
+        "model": llm.health(), "talent_hub": talent_hub.health(), "notice": flows.NOTICE,
+        "paused": db.get_setting("paused") == "1",
         "counts": counts, "total": sum(counts.values()),
         "tiles": {"new": counts.get("new", 0), "review": hr_count + flagged, "release": waiting,
                   "interview": counts.get("awaiting_result", 0) + counts.get("on_hold", 0), "selected": selected},
@@ -280,6 +292,21 @@ def team():
             })
     return {"employees": out, "paused": db.get_setting("paused") == "1", "model": llm.health(),
             "notice": flows.NOTICE, "scheduler": config.SCHEDULER_ENABLED}
+
+
+@app.get("/api/interns")
+def list_interns(specialization: str = "", q: str = "", limit: int = 200):
+    bounded_limit = max(1, min(limit, 1000))
+    rows = talent_hub.list_interns(specialization=specialization, q=q, limit=bounded_limit)
+    return {"interns": rows, "total": len(rows)}
+
+
+@app.get("/api/interns/{identifier}")
+def get_intern(identifier: str):
+    doc = talent_hub.get_intern(identifier)
+    if doc is None:
+        return JSONResponse({"detail": f"No intern matching {identifier} was found."}, status_code=404)
+    return doc
 
 
 # ---- changing (HR officer) -------------------------------------------------------------------

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (JSON, Boolean, Float, ForeignKey, Integer, String, Text,
-                        create_engine, event, func, select)
+                        create_engine, event, func, select, update as sa_update)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from . import config
@@ -333,21 +333,19 @@ def get_candidates_by_app_nos(app_nos: list[str] | set[str]) -> dict[str, Candid
 
 
 def update_candidate(candidate_id: int, expect_status: str | set | None = None, **fields: Any) -> bool:
-    """Save fields on a candidate. If expect_status is given, only save when the
-    candidate is still in that status. Returns True when saved."""
-    with Session() as s:
-        c = s.get(Candidate, candidate_id)
-        if c is None:
+    """Save fields on a candidate atomically. If expect_status is given, only save when the
+    candidate is still in that status inside SQLite. Returns True when saved."""
+    stmt = sa_update(Candidate).where(Candidate.id == candidate_id)
+    if expect_status is not None:
+        allowed = {expect_status} if isinstance(expect_status, str) else set(expect_status)
+        if not allowed:
             return False
-        if expect_status is not None:
-            allowed = {expect_status} if isinstance(expect_status, str) else set(expect_status)
-            if c.status not in allowed:
-                return False
-        for k, v in fields.items():
-            setattr(c, k, v)
-        c.updated_at = now()
+        stmt = stmt.where(Candidate.status.in_(allowed))
+    values = {**fields, "updated_at": now()}
+    with Session() as s:
+        res = s.execute(stmt.values(**values))
         s.commit()
-        return True
+        return (res.rowcount or 0) == 1
 
 
 def add_flag(candidate_id: int, text: str, by: str) -> None:

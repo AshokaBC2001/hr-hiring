@@ -12,7 +12,7 @@ import json
 import sys
 import time
 
-from hiring import actions, config, db, flows, llm, supervisor, talent_hub
+from hiring import actions, config, cv_generator, db, flows, llm, supervisor, talent_hub
 from hiring.checks import parse_json_object
 
 
@@ -45,7 +45,7 @@ def main() -> int:
         "command",
         choices=[
             "check", "samples", "once", "plan", "brief", "status",
-            "seed-talent-hub", "interns", "doctor", "report", "feedback",
+            "seed-talent-hub", "interns", "doctor", "report", "feedback", "generate-cvs",
         ],
     )
     ap.add_argument("--reviewer", default="Supervisor", help="Feedback author (for feedback --comment)")
@@ -53,7 +53,12 @@ def main() -> int:
     ap.add_argument("--rating", type=int, default=None, help="Optional rating 1-5")
     ap.add_argument("--target", default="", help="Optional target reference (e.g. APP-0001)")
     ap.add_argument("--comment", default="", help="Submit supervisor feedback text")
-    ap.add_argument("--out", default="", help="Optional output file path for report")
+    ap.add_argument("--out", default="", help="Optional output file/dir path")
+    ap.add_argument("--count", type=int, default=400, help="Count for generate-cvs (default: 400)")
+    ap.add_argument("--seed", type=int, default=20261116, help="Random seed for generate-cvs")
+    ap.add_argument("--load-db", action="store_true", help="Load generated CV PDFs into data/register.db")
+    ap.add_argument("--pending-ai", type=int, default=5, help="Leave N generated CVs in 'new' status for Recruiter AI")
+    ap.add_argument("--reset", action="store_true", help="Clear previous cv_*.pdf files before regenerating")
     a = ap.parse_args()
     if a.command == "check":
         return check()
@@ -129,6 +134,22 @@ def main() -> int:
             print(json.dumps(saved, indent=2))
         else:
             print(json.dumps(supervisor.list_feedback(), indent=2))
+    elif a.command == "generate-cvs":
+        from pathlib import Path
+        out = cv_generator.write_cv_pdfs(out_dir=a.out or None, count=a.count, seed=a.seed, reset=a.reset)
+        specs = out["specs"]
+        print(
+            f"Generated {out['written']} PDF CVs in {out['out_dir']} "
+            f"(unique_names={len({s.name for s in specs})}, unique_skill_sets={len({tuple(sorted(s.skills)) for s in specs})})"
+        )
+        if a.load_db:
+            by_name = {s.filename: s for s in specs}
+            stats = cv_generator.load_pdfs_into_register(
+                [Path(p) for p in out["paths"]],
+                pending_ai=a.pending_ai,
+                specs_by_filename=by_name,
+            )
+            print(json.dumps(stats))
     return 0
 
 

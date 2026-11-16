@@ -9,4 +9,5 @@ __pycache__/
 screenshots/
 .env
 .env.local
+data/cv_pool_pdfs/
 

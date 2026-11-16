@@ -160,19 +160,19 @@ To switch to the real TalentHub service later, set `TALENT_HUB_API_URL` (e.g. `h
 setup.sh, start_model.sh, start_app.sh, start_talent_hub.sh   setup and start scripts
 Dockerfile, .dockerignore, .env.example  container & hosting configuration
 app.py                                   web app entry point (supports HR_APP_HOST, PORT)
-run.py                                   CLI helpers: check, samples, once, plan, brief, status, seed-talent-hub, interns, doctor, feedback, report
+run.py                                   CLI helpers: check, samples, once, plan, brief, status, seed-talent-hub, interns, generate-cvs, doctor, feedback, report
 employees/                               the 5 AI agents (Markdown)
 shared/areas.json                        starter areas
 hiring/
   config.py     settings & .env          db.py              database (SQLite WAL + migrations)
   llm.py        pooled LLM client        checks.py          checks on model answers
   mailer.py     live SMTP sender         vacancies.py       MongoDB-backed vacancy planning
-  supervisor.py diagnostics & feedback   talent_hub.py      TalentHub API & direct MongoDB
-  talent_hub_mock.py local mock API      tools.py           CV reading, scoring, templates
-  employees.py  cached Markdown runner   flows.py           LangGraph + coalesced background runner
-  scheduler.py  APScheduler jobs         actions.py         user actions
-  server.py     FastAPI routes, hosting guards & exports
-scripts/                                 dataset importers & TalentHub seeder
+  supervisor.py diagnostics & feedback   cv_generator.py    400 unique PDF CV model & loader
+  talent_hub.py TalentHub API & MongoDB  talent_hub_mock.py local mock API
+  tools.py      CV reading, scoring      employees.py       cached Markdown runner
+  flows.py      LangGraph workflows      scheduler.py       APScheduler jobs
+  actions.py    user actions             server.py          FastAPI routes, hosting guards & exports
+scripts/                                 dataset importers, TalentHub seeder & generate_cv_pool.py
 docs/                                    architecture, specs, plans & hosting/supervisor guide
 web/                                     front end (HTML, CSS, JavaScript)
 ```

@@ -48,12 +48,23 @@ def main() -> int:
     if a.command == "check":
         return check()
     if a.command == "seed-talent-hub":
-        res = talent_hub.seed_sample_interns(100)
+        try:
+            res = talent_hub.seed_sample_interns(100)
+        except talent_hub.TalentHubUnavailable as exc:
+            print(f"Error: {exc}")
+            print(f"Check TALENT_HUB_MONGO_URI ({config.TALENT_HUB_MONGO_URI}) and ensure mongod is running.")
+            return 1
+        finally:
+            talent_hub.close()
         print(f"Seeded {res['db']}.{res['collection']}: total={res['total']} (upserted={res['upserted']}, modified={res['modified']})")
-        talent_hub.close()
         return 0
     if a.command == "interns":
-        rows = talent_hub.list_interns(limit=200)
+        try:
+            rows = talent_hub.list_interns(limit=200)
+        except (talent_hub.TalentHubUnavailable, talent_hub.TalentHubAuthError) as exc:
+            print(f"Error: {exc}")
+            print("Start the local mock server with ./start_talent_hub.sh or check TALENT_HUB_API_URL / TALENT_HUB_API_TOKEN.")
+            return 1
         for r in rows:
             print(f"{r['Trainee_ID']:6}  {r['Trainee_Name']:24} {r['Training_StartDate']} -> {r['Training_EndDate']}  {r['field_of_spec_name']}")
         print(f"Total shown: {len(rows)}")

@@ -374,3 +374,24 @@ def test_live_mongodb_schema_and_seeding_when_mongod_running(monkeypatch):
         talent_hub.close()
         client.drop_database(temp_db)
         client.close()
+
+
+def test_cli_run_interns_and_seed_handle_unavailable_cleanly(monkeypatch, capsys):
+    import run as cli_run
+
+    monkeypatch.setattr(config, "TALENT_HUB_API_URL", "http://127.0.0.1:59999/api")
+    monkeypatch.setattr(config, "TALENT_HUB_MONGO_URI", "mongodb://127.0.0.1:27999")
+    monkeypatch.setattr(config, "TALENT_HUB_TIMEOUT_MS", 200)
+    talent_hub.close()
+
+    monkeypatch.setattr(sys, "argv", ["run.py", "interns"])
+    rc_interns = cli_run.main()
+    out_interns = capsys.readouterr().out
+    assert rc_interns == 1
+    assert "Error:" in out_interns and "start_talent_hub.sh" in out_interns
+
+    monkeypatch.setattr(sys, "argv", ["run.py", "seed-talent-hub"])
+    rc_seed = cli_run.main()
+    out_seed = capsys.readouterr().out
+    assert rc_seed == 1
+    assert "Error:" in out_seed and "TALENT_HUB_MONGO_URI" in out_seed

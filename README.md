@@ -1,6 +1,6 @@
-# HR Hiring
+# SLT HR Hiring
 
-A local, AI-assisted hiring workflow. Four AI agents handle the routine work of screening CVs, scheduling interviews and drafting emails. Two people make every decision that matters.
+A local, AI-assisted intern hiring workflow built for **SLT (Sri Lanka Telecom)**. Five AI agents handle the routine work of screening CVs, tracking intern vacancies, scheduling interviews, preparing placement letters, and drafting emails. Two people make every decision that matters.
 
 | Role | Type | Responsibility |
 |---|---|---|
@@ -41,8 +41,9 @@ fpdf2 (placement letter PDF), and plain HTML, CSS and JavaScript.
 ## Installation
 
 ```bash
-git clone <your-repo-url>
-cd <repo-folder>
+git clone https://github.com/AshokaBC2001/hr-hiring.git
+cd hr-hiring
+git checkout feature/outlook-email-performance
 bash setup.sh
 ```
 
@@ -135,11 +136,22 @@ Talent Hub (read only)
 - **Lessons:** when a check fails, the agent saves a short lesson (no personal data) in `data/notes/` and uses it next time.
 - **No forced areas:** the model may suggest a new area, but only a person can add one.
 
+## Microsoft Outlook setup
+
+1. **Zero-setup `.eml` & Outlook Web (default):** Releasing an email writes an Outlook-ready `.eml` draft (`X-Unsent: 1`, with any placement letter PDF attached) into `data/outbox/`, downloadable from the UI, alongside one-click **Outlook Web** compose buttons (`outlook.office.com` / `outlook.live.com`).
+2. **Microsoft Graph Drafts / Direct Send (`msal` OAuth 2.0 Device Code Flow):** Works with both organizational Microsoft 365 (`common` tenant) and personal Outlook accounts without storing passwords:
+   - Open https://entra.microsoft.com (or https://portal.azure.com) → **App registrations** → **New registration** (select **Accounts in any organizational directory and personal Microsoft accounts**).
+   - Under **Authentication**, toggle **Allow public client flows** to **Yes** and save.
+   - Under **API permissions**, add Microsoft Graph **Delegated permissions**: `User.Read`, `Mail.ReadWrite`, `Mail.Send`.
+   - Paste the **Application (Client) ID** in **Replies → Outlook settings**, click **Sign in with Microsoft (Outlook)**, confirm the one-time code in your browser, and select **`graph_draft`** (save directly to Outlook Drafts) or **`graph_send`** (send directly from Outlook).
+3. **Office 365 SMTP fallback & CLI helpers:** Optional `smtp.office365.com:587` STARTTLS settings, a **Safe Demo Recipient Override** (`test_recipient`) for routing supervisor demos safely, and CLI commands `.venv/bin/python run.py outlook-status`, `run.py outlook-login`, and `run.py outlook-test --target <email>`.
+
 ## Configuration
 
 | What | Where |
 |---|---|
 | Areas, required skills and related studies | **Areas** page |
+| Microsoft Outlook delivery & settings | **Outlook settings** button on **Replies** / candidate pages, or `HR_OUTLOOK_*` env vars / `.env` |
 | Which areas a CV is suggested for | `POOL_MIN_SCORE`, `POOL_CLOSE_POINTS`, `POOL_SUGGEST_AREAS`, `SHARED_SKILL_AREAS` in `hiring/config.py` |
 | Talent Hub: source, address and field names | `TALENTHUB_*` in `hiring/config.py` |
 | Days of notice before a place opens, and reserves | `VACANCY_NOTICE_DAYS`, `VACANCY_RESERVES` in `hiring/config.py` |

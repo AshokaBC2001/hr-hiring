@@ -11,11 +11,11 @@ from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
-from . import actions, config, db, flows, llm, scheduler, talenthub, tools, vacancies
+from . import actions, config, db, flows, letters, llm, scheduler, talenthub, tools, vacancies
 from .employees import EMPLOYEES, lessons, role_summary, routines, schedule
 
 VERSION = "1.0"
@@ -24,6 +24,7 @@ VERSION = "1.0"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.setup()
+    actions.upgrade_scoring()
     if config.SCHEDULER_ENABLED:
         scheduler.start()
     yield
@@ -90,10 +91,27 @@ def _draft_json(d: db.Draft, c: db.Candidate | None = None) -> dict:
            "created_at": d.created_at, "released_at": d.released_at, "file": d.file}
     if c is not None:
         before = actions.RELEASE_MOVES[d.kind][0]
+        blocker = "" if c.email else "Add the candidate's email first."
+        if d.kind == "acceptance":
+            out["attachment"] = letters.file_name(c)
+            if not blocker and not letters.dates_ready(c):
+                blocker = "Add the start and end dates for the placement letter first."
         out.update(app_no=c.app_no, name=c.name, email=c.email, candidate_status=c.status,
-                   can_release=(d.status == "waiting" and c.status == before and bool(c.email)),
-                   release_blocker="" if c.email else "Add the candidate's email first.")
+                   can_release=(d.status == "waiting" and c.status == before and not blocker),
+                   release_blocker=blocker)
     return out
+
+
+def _letter_json(c: db.Candidate) -> dict | None:
+    """The placement letter box on the candidate page (only after a work ID is issued)."""
+    if not c.work_id:
+        return None
+    letter = c.letter or {}
+    start, end = letters.letter_dates(c)
+    auto = letters.automatic_dates(c)
+    return {"start_date": start, "end_date": end, "automatic": (start, end) == auto,
+            "file": letter.get("file") or letters.file_name(c), "made_at": letter.get("made_at", ""),
+            "ready": letters.dates_ready(c), "can_edit": c.status in actions.LETTER_EDIT_STATUSES}
 
 
 def detail(c: db.Candidate) -> dict:
@@ -108,6 +126,7 @@ def detail(c: db.Candidate) -> dict:
         "score_parts": c.score_parts or {}, "gaps": c.gaps or [], "questions": c.questions or [],
         "questions_source": c.questions_source, "result_comment": c.result_comment, "result_at": c.result_at,
         "checklist": c.checklist or [],
+        "letter": _letter_json(c),
         "area_scores": [{"area": a, "score": sc} for a, sc in tools.top_areas(c.area_scores or {})],
         "active_areas": [a.name for a in db.active_areas()],
         "flags": [dict(f, index=i) for i, f in enumerate(c.flags or [])],
@@ -184,7 +203,7 @@ def list_candidates(status: str = "", q: str = ""):
             query = query.where(db.Candidate.status.not_in({"closed"} | config.NOT_IN_HIRING))
         elif status:
             query = query.where(db.Candidate.status == status)
-        else:                                    # All: the hiring flow only (pool CVs are on the Pool page)
+        else:                                    # All: the hiring flow only (pool CVs are on the Add CV page)
             query = query.where(db.Candidate.status.not_in(config.NOT_IN_HIRING))
         rows = list(s.scalars(query))
     if q:
@@ -206,6 +225,24 @@ def get_candidate(app_no: str):
 def download_cv(app_no: str):
     path, name = actions.cv_file(app_no)
     return FileResponse(path, filename=name)
+
+
+@app.get("/api/candidates/{app_no}/letter")
+def placement_letter(app_no: str, download: int = 0):
+    """The placement letter PDF: shown in the browser, or downloaded with ?download=1."""
+    c = db.get_candidate(app_no)
+    if c is None or not c.work_id:
+        raise actions.ActionError("There is no placement letter for this candidate yet.")
+    how = "attachment" if download else "inline"
+    return Response(letters.read(c), media_type="application/pdf",
+                    headers={"Content-Disposition": f'{how}; filename="{letters.file_name(c)}"'})
+
+
+@app.post("/api/candidates/{app_no}/letter")
+async def save_letter(app_no: str, request: Request):
+    _need_role(request, "hr")
+    b = await request.json()
+    return {"letter": actions.save_letter_dates(app_no, b.get("start_date", ""), b.get("end_date", ""))}
 
 
 @app.get("/api/review")
@@ -365,7 +402,10 @@ def pool(area: str = "", show: str = "all", q: str = ""):
         def area_score(c):
             v = (c.area_scores or {}).get(area)
             return v["score"] if v else None
-        rows = [c for c in rows if c.status == "in_pool" and (area_score(c) or 0) >= config.POOL_MIN_SCORE]
+        # Only CVs that score enough for this area AND show real evidence for it (a related
+        # project, job or studies). A skills list alone does not put a CV on an area's list.
+        rows = [c for c in rows if c.status == "in_pool"
+                and any(n == area for n, _ in tools.good_areas(c.area_scores or {}))]
         rows.sort(key=lambda c: (-area_score(c), c.id))
     elif show == "recent":
         rows.sort(key=lambda c: (c.created_at or "", c.id), reverse=True)
@@ -382,8 +422,8 @@ def pool(area: str = "", show: str = "all", q: str = ""):
                         area_score=v["score"] if v else None,
                         gaps=(v or {}).get("gaps", []) if shown else [],
                         other_areas=[{"area": n, "score": sc} for n, sc in
-                                     tools.top_areas(scores, skip=tuple(x for x in (c.area, area) if x),
-                                                     n=config.POOL_OTHER_AREAS)]))
+                                     tools.good_areas(scores, skip=tuple(x for x in (c.area, area) if x),
+                                                      n=config.POOL_OTHER_AREAS)]))
     return {"stats": stats, "areas": areas, "min_score": config.POOL_MIN_SCORE, "area": area if area in areas else "",
             "show": show, "rows": out}
 
@@ -421,7 +461,7 @@ def list_areas():
                                    .where(db.Candidate.suggested_new_area != "")
                                    .group_by(db.Candidate.suggested_new_area)).all())
     return {"areas": [{"id": a.id, "name": a.name, "description": a.description, "required_skills": a.required_skills,
-                       "preferred_skills": a.preferred_skills, "keywords": a.keywords, "checklist": a.checklist,
+                       "preferred_skills": a.preferred_skills, "studies": a.studies or [], "keywords": a.keywords, "checklist": a.checklist,
                        "active": a.active, "added_by": a.added_by, "candidates": counts.get(a.name, 0)} for a in rows],
             "suggested": [{"name": k, "count": v} for k, v in suggested.items()]}
 
@@ -580,7 +620,8 @@ async def add_area(request: Request):
     _need_role(request, "hr")
     b = await request.json()
     new_id = actions.save_area(None, b.get("name", ""), b.get("description", ""), b.get("required_skills", ""),
-                               b.get("preferred_skills", ""), b.get("keywords", ""), b.get("checklist", ""), True)
+                               b.get("preferred_skills", ""), b.get("keywords", ""), b.get("checklist", ""), True,
+                               b.get("studies"))
     actions.rescore_pool()
     _kick()
     return {"id": new_id}
@@ -592,7 +633,7 @@ async def update_area(area_id: int, request: Request):
     b = await request.json()
     actions.save_area(area_id, b.get("name", ""), b.get("description", ""), b.get("required_skills", ""),
                       b.get("preferred_skills", ""), b.get("keywords", ""), b.get("checklist", ""),
-                      b.get("active", True))
+                      b.get("active", True), b.get("studies"))
     actions.rescore_pool()
     _kick()
     return {"ok": True}

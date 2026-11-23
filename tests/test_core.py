@@ -2,6 +2,9 @@
 
     .venv/bin/python -m pytest tests -q
 """
+import email
+import email.policy
+import io
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -12,7 +15,7 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fake_model import FakeModel  # noqa: E402
-from hiring import actions, checks, config, db, employees, flows, llm, talenthub, tools, vacancies  # noqa: E402
+from hiring import actions, checks, config, db, employees, flows, letters, llm, talenthub, tools, vacancies  # noqa: E402
 
 SAMPLES = config.SAMPLES_DIR
 
@@ -122,6 +125,80 @@ def test_scoring_uses_the_weights_and_finds_gaps(fake):
     assert sorted(gaps) == ["Bash", "CI/CD", "Cloud"]
     assert score == sum(p["points"] for p in parts.values()) or abs(score - sum(p["points"] for p in parts.values())) <= 2
     assert tools.shortlist_status(score) == "borderline"
+
+
+def _scores(text: str) -> dict:
+    areas = db.active_areas()
+    return tools.score_all_areas(tools.rule_profile(text, tools.skill_vocabulary(areas)), text, areas)
+
+
+def test_each_area_has_its_own_related_studies(fake):
+    hr = _scores(tools.read_cv(SAMPLES / "laura_bennett.pdf"))     # Bachelor of Business (Human Resource Management)
+    assert hr["Human Resources"]["parts"]["education"]["points"] == 20
+    it = _scores(tools.read_cv(SAMPLES / "arjun_mehta.txt"))       # B.Tech in Data Science
+    assert it["AI/ML"]["parts"]["education"]["points"] == 20
+    assert it["Human Resources"]["parts"]["education"]["points"] == 10   # studies, but not a related subject
+    assert all(a.studies for a in db.active_areas())
+
+
+IT_CV_WITH_HR_SKILLS = """Nimal Perera
+nimal@example.com
+
+Education
+BSc in Computer Science, University of Colombo (2022 - 2026)
+
+Skills
+Python, Machine Learning, Pandas, NumPy, Scikit-learn, Deep Learning, Recruitment, Communication,
+Microsoft Excel, Employee Relations, Interviewing
+
+Projects
+- Built a neural network to classify plant diseases from leaf photos
+- Prediction model for house prices using regression
+"""
+
+
+def test_a_skills_list_alone_does_not_put_a_cv_in_another_area(fake):
+    scores = _scores(IT_CV_WITH_HR_SKILLS)
+    assert scores["Human Resources"]["evidence"] == []              # no HR project, job or studies
+    assert "Human Resources" not in [n for n, _ in tools.good_areas(scores)]
+    assert tools.suggest_areas(scores) == ["AI/ML"]
+
+
+def test_a_cv_is_suggested_for_its_best_area_and_only_a_close_second(fake):
+    rahul = _scores(tools.read_cv(SAMPLES / "rahul_nair.txt"))      # MLOps 95, AI/ML 80: too far apart
+    assert tools.suggest_areas(rahul) == ["MLOps"]
+    daniel = _scores(tools.read_cv(SAMPLES / "daniel_kim.txt"))     # DevOps and MLOps equally strong
+    assert sorted(tools.suggest_areas(daniel)) == ["DevOps", "MLOps"]
+    arjun = _scores(tools.read_cv(SAMPLES / "arjun_mehta.txt"))
+    assert tools.suggest_areas(arjun) == ["AI/ML"]
+    fake_scores = {"A": {"score": 90, "evidence": ["x"]}, "B": {"score": 85, "evidence": ["x"]},
+                   "C": {"score": 84, "evidence": ["x"]}, "D": {"score": 70, "evidence": ["x"]}}
+    assert tools.suggest_areas(fake_scores) == ["A", "B"]           # never more than two areas
+
+
+def test_a_suggestion_that_no_longer_fits_is_taken_away(fake):
+    no = add("arjun_mehta.txt")
+    flows.run_employee("recruiter", wait=True)
+    vid = actions.add_vacancy("Learning and Development", 1, "Test")
+    db.update_vacancy(vid, suggestions=[{"app_no": no, "name": "Arjun", "score": 55, "gaps": [],
+                                         "state": "suggested", "at": db.now()}])   # as an older version did
+    vacancies.suggest_for_open()
+    assert db.get_vacancy(vid).suggestions == []
+
+
+def test_an_older_register_is_scored_again_once(fake):
+    no = add("arjun_mehta.txt")
+    flows.run_employee("recruiter", wait=True)
+    with db.Session() as s:                                         # how an older register looked
+        for a in s.scalars(select(db.Area)):
+            a.studies = []
+        s.commit()
+    db.update_candidate(cand(no).id, area_scores={"Learning and Development": {"score": 55, "parts": {}, "gaps": []}})
+    db.set_setting("scoring_version", "1")
+    assert actions.upgrade_scoring()["rescored"] == 1
+    assert db.area_by_name("AI/ML").studies
+    assert "evidence" in cand(no).area_scores["AI/ML"]
+    assert actions.upgrade_scoring()["rescored"] == 0               # only once
 
 
 def test_shortlist_thresholds():
@@ -282,11 +359,11 @@ def test_approving_a_suggestion_starts_the_hiring_flow_and_fills_the_place(fake,
 
 
 def test_a_candidate_who_fails_is_replaced_from_the_pool(fake, monkeypatch):
-    for name in ("arjun_mehta.txt", "rahul_nair.txt"):
+    for name in ("rahul_nair.txt", "daniel_kim.txt"):          # both fit MLOps
         add(name)
     flows.run_employee("recruiter", limit=10, wait=True)
     fake_talenthub(monkeypatch, [{"traineeId": "T1", "name": "One",
-                                  "endDate": utc(date.today() + timedelta(days=2)), "specialization": "AI/ML"}])
+                                  "endDate": utc(date.today() + timedelta(days=2)), "specialization": "MLOps"}])
     talenthub.sync()
     vacancies.find_and_update()
     v = db.vacancies_in("open")[0]
@@ -302,17 +379,19 @@ def test_a_candidate_who_fails_is_replaced_from_the_pool(fake, monkeypatch):
 
 
 def test_one_cv_cannot_be_approved_for_two_areas(fake, monkeypatch):
-    add("rahul_nair.txt")                                     # fits MLOps, AI/ML and DevOps
+    add("daniel_kim.txt")                                     # DevOps and MLOps are equally strong
     flows.run_employee("recruiter", wait=True)
     soon = utc(date.today() + timedelta(days=2))
     fake_talenthub(monkeypatch, [
         {"traineeId": "T1", "name": "One", "endDate": soon, "specialization": "MLOps"},
-        {"traineeId": "T2", "name": "Two", "endDate": soon, "specialization": "AI/ML"}])
+        {"traineeId": "T2", "name": "Two", "endDate": soon, "specialization": "DevOps"}])
     talenthub.sync()
     vacancies.find_and_update()
     mlops = [v for v in db.vacancies_in("open") if v.area == "MLOps"][0]
+    other = [v for v in db.vacancies_in("open") if v.area == "DevOps"][0]
+    assert [s["app_no"] for s in other.suggestions] == ["APP-0001"]   # suggested for both, a close second
     actions.approve_suggestion(mlops.id, "APP-0001")
-    other = [v for v in db.vacancies_in("open") if v.area == "AI/ML"][0]
+    other = db.get_vacancy(other.id)
     assert [s["state"] for s in other.suggestions if s["app_no"] == "APP-0001"] == ["taken"]
     with pytest.raises(actions.ActionError):
         actions.approve_suggestion(other.id, "APP-0001")
@@ -345,6 +424,18 @@ def test_declining_a_suggestion_brings_in_the_next_one(fake):
     v = db.get_vacancy(vid)
     assert [s["state"] for s in v.suggestions if s["app_no"] == first] == ["failed"]
     assert cand(first).status == "in_pool"                    # still in the pool for other areas
+
+
+def test_cvs_added_after_a_vacancy_is_opened_are_suggested_straight_away(fake, monkeypatch):
+    fake_talenthub(monkeypatch, [{"traineeId": "T1", "name": "One",
+                                  "endDate": utc(date.today() + timedelta(days=2)), "specialization": "AI/ML"}])
+    flows.run_planner()                                   # the pool is still empty
+    v = db.vacancies_in("open")[0]
+    assert v.suggestions == []
+    add("arjun_mehta.txt")                                # the HR officer adds a CV afterwards
+    flows.run_employee("recruiter", wait=True)
+    v = db.get_vacancy(v.id)
+    assert [s["app_no"] for s in v.suggestions] == ["APP-0001"]
 
 
 def test_the_planner_runs_every_step_and_survives_talenthub_being_down(fake, monkeypatch):
@@ -513,13 +604,78 @@ def test_pass_flow_end_to_end(fake):
     with pytest.raises(actions.ActionError):
         actions.enter_result(a, "Pass")              # invitation not released yet
     assert _release_waiting(a) == "awaiting_result"
-    assert list(db.paths.outbox.glob("*.txt"))       # saved, not sent
+    assert list(db.paths.outbox.glob("*.eml"))       # saved, not sent
     actions.enter_result(a, "Pass", "Good")
     flows.run_all_once()
     c = cand(a)
     assert c.status == "offer_ready" and c.work_id == 1001 and c.checklist
+    assert (db.paths.letters / c.letter["file"]).exists()      # made by the Onboarding employee
+    start, end = letters.automatic_dates(c)                    # the Monday after the interview, six months
+    assert c.letter["start_date"] == start and c.letter["end_date"] == end
+    actions.save_letter_dates(a, "2026-12-01", "2027-05-31")  # the HR officer may change them
     assert _release_waiting(a) == "closed"
     assert cand(a).outcome.startswith("Selected")
+    eml = [f for f in db.paths.outbox.glob("*.eml") if "acceptance" in f.name][0]
+    msg = email.message_from_bytes(eml.read_bytes(), policy=email.policy.default)
+    files = [part for part in msg.iter_attachments()]
+    assert [f.get_filename() for f in files] == [f"Placement_Letter_{a}.pdf"]
+    assert "placement letter" in msg.get_body(("plain",)).get_content().lower()
+    text = _pdf_text(files[0].get_content())
+    for must in ("Arjun Mehta", "AI/ML", "1001", "1 December 2026", "31 May 2027", f"PL/{a}"):
+        assert must in text
+
+
+def _pdf_text(data: bytes) -> str:
+    from pypdf import PdfReader
+    return "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(data)).pages)
+
+
+def test_placement_letter_dates_and_wording(fake):
+    a = add("arjun_mehta.txt")
+    flows.run_all_once()
+    invite(a)
+    flows.run_all_once()
+    _release_waiting(a)
+    actions.enter_result(a, "Pass", "Good")
+    flows.run_all_once()
+    c = cand(a)
+    text = _pdf_text(letters.read(c))
+    start, end = letters.automatic_dates(c)
+    assert letters.long_date(start) in text and letters.long_date(end) in text
+    assert "Placement Letter" in text and "Dear Arjun Mehta" in text and "HR Officer" not in text
+    with pytest.raises(actions.ActionError, match="after the start date"):
+        actions.save_letter_dates(a, "2027-05-31", "2026-12-01")
+    with pytest.raises(actions.ActionError, match="not a valid date"):
+        actions.save_letter_dates(a, "31/05/2027", "")
+    actions.save_letter_dates(a, "2026-12-01", "2027-05-31")
+    assert "1 December 2026" in _pdf_text(letters.read(cand(a)))
+    actions.save_letter_dates(a, "", "")                       # cleared: back to the automatic dates
+    assert cand(a).letter["start_date"] == start
+    actions.save_letter_dates(a, "2026-12-01", "2027-05-31")
+    _release_waiting(a)
+    with pytest.raises(actions.ActionError, match="before the acceptance email is released"):
+        actions.save_letter_dates(a, "2026-12-02", "2027-05-31")    # locked once it has gone out
+
+
+def test_the_automatic_placement_dates():
+    def c(interview_at="", result_at=""):
+        return db.Candidate(interview_at=interview_at, result_at=result_at, letter={})
+    assert letters.automatic_dates(c("2026-11-24T09:30")) == ("2026-11-30", "2027-05-29")   # Tuesday
+    assert letters.automatic_dates(c("2026-11-30T10:00")) == ("2026-12-07", "2027-06-06")   # a Monday: the next one
+    assert letters.automatic_dates(c("2026-11-29T10:00")) == ("2026-11-30", "2027-05-29")   # Sunday: the next day
+    assert letters.automatic_dates(c("", "2026-08-27T15:00")) == ("2026-08-31", "2027-02-27")  # no slot: result date
+    assert letters.add_months(date(2026, 8, 31), 6) == date(2027, 2, 28)
+
+
+def test_a_name_with_accents_prints_in_the_letter(fake):
+    with db.Session() as s:
+        c = db.Candidate(app_no="APP-0900", name="Zoë Müller-Šimić", email="zoe@example.com", area="AI/ML",
+                         work_id=1500, status="offer_ready", letter={}, created_at=db.now(), updated_at=db.now())
+        s.add(c)
+        s.commit()
+        cid = c.id
+    letters.make(cid)
+    assert "Zoë Müller-Šimić" in _pdf_text(letters.read(db.get_candidate(cid)))
 
 
 def test_fail_and_hold_flows(fake):

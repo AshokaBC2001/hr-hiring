@@ -53,6 +53,26 @@ def test_upload_and_flow(client):
     assert client.get("/api/interviews").json()["waiting"][0]["app_no"] == app_no
     assert client.post(f"/api/candidates/{app_no}/result", headers=IN, json={"result": "Pass"}).status_code == 200
 
+    # After the Pass: the acceptance email carries the placement letter
+    flows.run_all_once()
+    d = client.get(f"/api/candidates/{app_no}").json()
+    acceptance = [x for x in d["drafts"] if x["kind"] == "acceptance"][0]
+    assert acceptance["attachment"] == f"Placement_Letter_{app_no}.pdf"
+    assert acceptance["can_release"]                                   # the dates are set automatically
+    assert d["letter"]["can_edit"] and d["letter"]["ready"] and d["letter"]["automatic"]
+    pdf = client.get(f"/api/candidates/{app_no}/letter")
+    assert pdf.status_code == 200 and pdf.headers["content-type"] == "application/pdf" and pdf.content[:4] == b"%PDF"
+    assert client.get(f"/api/candidates/{app_no}/letter?download=1").headers["content-disposition"].startswith("attachment")
+    dates = {"start_date": "2026-12-01", "end_date": "2027-05-31"}
+    assert client.post(f"/api/candidates/{app_no}/letter", headers=IN, json=dates).status_code == 400   # HR only
+    assert client.post(f"/api/candidates/{app_no}/letter", headers=HR, json={**dates, "end_date": "2026-11-01"}).status_code == 400
+    assert client.post(f"/api/candidates/{app_no}/letter", headers=HR, json=dates).json()["letter"]["start_date"] == "2026-12-01"
+    d = client.get(f"/api/candidates/{app_no}").json()
+    acceptance = [x for x in d["drafts"] if x["kind"] == "acceptance"][0]
+    assert d["letter"]["ready"] and not d["letter"]["automatic"] and acceptance["can_release"]
+    assert client.post(f"/api/drafts/{acceptance['id']}/release", headers=HR).json()["status"] == "closed"
+    assert not client.get(f"/api/candidates/{app_no}").json()["letter"]["can_edit"]
+
 
 def test_roles_are_enforced(client):
     client.post("/api/samples", headers=HR)
@@ -126,6 +146,16 @@ def test_bad_input_gives_a_clear_message(client):
     assert client.get("/api/candidates/..%2F..%2Fetc/cv").status_code in (400, 404)
     r = client.post("/api/areas", headers=HR, json={"name": "Empty area", "required_skills": ""})
     assert r.status_code == 400 and "required skill" in r.json()["detail"]
+
+
+def test_an_area_keeps_its_related_studies(client):
+    r = client.post("/api/areas", headers=HR, json={"name": "Civil Engineering", "required_skills": "AutoCAD, Surveying",
+                                                    "studies": "Civil Engineering, Construction Management"})
+    assert r.status_code == 200
+    area = next(a for a in client.get("/api/areas").json()["areas"] if a["name"] == "Civil Engineering")
+    assert area["studies"] == ["Civil Engineering", "Construction Management"]
+    ai = next(a for a in client.get("/api/areas").json()["areas"] if a["name"] == "AI/ML")
+    assert "data science" in ai["studies"]
 
 
 def test_review_lists_decisions_and_suggested_areas(client):

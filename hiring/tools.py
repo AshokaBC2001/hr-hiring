@@ -3,6 +3,7 @@
 - read_cv: get text out of PDF, Word and text files
 - rule_profile: a simple profile made by rules (used when the model fails)
 - score_cv / skill gaps / best_area_by_rules: the weighted score
+- suggest_areas: which areas a CV is suggested for (its best area, and a close second)
 - pick_interview_slot: next free slot on a working day
 - induction_checklist and the reply templates
 """
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -53,7 +55,7 @@ HEADINGS = {
     "employment": "experience", "professional experience": "experience",
     "summary": "other", "profile": "other", "about me": "other", "certifications": "other",
     "languages": "other", "references": "other", "achievements": "other", "contact": "other",
-    "interests": "other", "activities": "other", "extracurricular activities": "other",
+    "interests": "other", "hobbies": "other", "activities": "other", "extracurricular activities": "other",
 }
 GENERAL_SKILLS = ["Python", "Java", "JavaScript", "TypeScript", "C++", "C#", "SQL", "Git", "Linux", "HTML",
                   "CSS", "React", "Node.js", "Excel", "Power BI", "Tableau", "Figma", "Communication",
@@ -127,27 +129,55 @@ def _area_terms(area) -> list[str]:
     return list(area.required_skills or []) + list(area.preferred_skills or []) + list(area.keywords or [])
 
 
-def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[str]]:
-    """Weighted score out of 100 against one area. Returns (score, parts, gaps).
-    The score is None when the area has no required skills yet."""
+def shared_terms(areas: list) -> set[str]:
+    """Skills and keywords listed by many areas, for example Excel, SQL and Communication.
+    Many jobs ask for them, so on their own they do not show that a project fits one area."""
+    count: Counter = Counter()
+    for a in areas:
+        for term in {norm(x) for x in _area_terms(a)}:
+            count[term] += 1
+    return {term for term, n in count.items() if n > config.SHARED_SKILL_AREAS}
+
+
+def _specific_terms(area, shared: set[str] | None) -> list[str]:
+    terms = _area_terms(area)
+    if not shared:
+        return terms
+    return [x for x in terms if norm(x) not in shared] or terms
+
+
+def _related_studies(area, education: str) -> bool:
+    """True when the CV's studies fit this area. Each area has its own list of related
+    studies; an area without a list falls back to its own name and required skills."""
+    edu = " " + norm(education) + " "
+    studies = list(getattr(area, "studies", None) or []) or [area.name] + list(area.required_skills or [])
+    return any(norm(k) and f" {norm(k)} " in edu for k in studies)
+
+
+def area_score(profile: dict, cv_text: str, area, shared: set[str] | None = None) -> dict | None:
+    """Weighted score out of 100 against one area, with the parts, the skill gaps and the
+    evidence. Returns None when the area has no required skills yet.
+
+    Evidence means the CV shows real work or study in this area: a related project, a related
+    job or related studies. A skills list alone is not evidence, because it is easy to write."""
     w = config.WEIGHTS
     required = list(area.required_skills or [])
     if not required:
-        return None, {}, []
+        return None
     cv = CVText(cv_text)
     found = [s for s in required if cv.has(s)]
     gaps = [s for s in required if s not in found]
     preferred_found = [s for s in (area.preferred_skills or []) if cv.has(s)]
     skills_pts = w["skills"] * len(found) / len(required)
 
-    terms = _area_terms(area)
+    terms = _specific_terms(area, shared)
     projects = profile.get("projects") or []
-    relevant_projects = [p for p in projects if any(CVText(p).has(t) for t in terms)]
+    relevant_projects = [p for p in projects if any(CVText(p).has(x) for x in terms)]
     projects_pts = w["projects"] * min(len(relevant_projects), 2) / 2
 
     education = " ".join(profile.get("education") or [])
-    edu_norm = " " + norm(education) + " "
-    if any(f" {norm(k)} " in edu_norm for k in config.RELEVANT_EDUCATION):
+    related_studies = bool(education.strip()) and _related_studies(area, education)
+    if related_studies:
         edu_pts, edu_why = w["education"], "Studies a related subject"
     elif education.strip():
         edu_pts, edu_why = w["education"] / 2, "Studies, but not in a related subject"
@@ -155,7 +185,7 @@ def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[
         edu_pts, edu_why = 0, "No education found in the CV"
 
     experience = profile.get("experience") or []
-    relevant_exp = [e for e in experience if any(CVText(e).has(t) for t in terms)]
+    relevant_exp = [e for e in experience if any(CVText(e).has(x) for x in terms)]
     if relevant_exp:
         exp_pts, exp_why = w["experience"], "Has related work experience"
     elif experience:
@@ -172,18 +202,33 @@ def score_cv(profile: dict, cv_text: str, area) -> tuple[int | None, dict, list[
         "education": {"points": round(edu_pts), "max": w["education"], "why": edu_why},
         "experience": {"points": round(exp_pts), "max": w["experience"], "why": exp_why},
     }
+    evidence = []
+    if relevant_projects:
+        evidence.append(f"{len(relevant_projects)} related project(s)")
+    if relevant_exp:
+        evidence.append("related work experience")
+    if related_studies:
+        evidence.append("related studies")
     total = round(skills_pts + projects_pts + edu_pts + exp_pts)
-    return total, parts, gaps
+    return {"score": total, "parts": parts, "gaps": gaps, "evidence": evidence}
+
+
+def score_cv(profile: dict, cv_text: str, area, shared: set[str] | None = None) -> tuple[int | None, dict, list[str]]:
+    """Weighted score out of 100 against one area. Returns (score, parts, gaps).
+    The score is None when the area has no required skills yet."""
+    r = area_score(profile, cv_text, area, shared)
+    return (None, {}, []) if r is None else (r["score"], r["parts"], r["gaps"])
 
 
 def score_all_areas(profile: dict, cv_text: str, areas: list) -> dict:
-    """Scores the CV against every area (plain code). Returns {area name: {score, parts, gaps}}.
+    """Scores the CV against every area (plain code). Returns {area name: {score, parts, gaps, evidence}}.
     Areas without required skills are left out, because they cannot be scored."""
+    shared = shared_terms(areas)
     out = {}
     for a in areas:
-        total, parts, gaps = score_cv(profile, cv_text, a)
-        if total is not None:
-            out[a.name] = {"score": total, "parts": parts, "gaps": gaps}
+        r = area_score(profile, cv_text, a, shared)
+        if r is not None:
+            out[a.name] = r
     return out
 
 
@@ -192,6 +237,26 @@ def top_areas(area_scores: dict, skip: tuple = (), n: int | None = None) -> list
     rows = sorted(((k, v["score"]) for k, v in (area_scores or {}).items() if k not in skip),
                   key=lambda x: (-x[1], x[0]))
     return rows[:n] if n else rows
+
+
+def good_areas(area_scores: dict, skip: tuple = (), n: int | None = None) -> list[tuple[str, int]]:
+    """Areas where the CV scores at least POOL_MIN_SCORE and shows real evidence, best first."""
+    rows = [(k, sc) for k, sc in top_areas(area_scores, skip)
+            if sc >= config.POOL_MIN_SCORE and (area_scores[k].get("evidence"))]
+    return rows[:n] if n else rows
+
+
+def suggest_areas(area_scores: dict) -> list[str]:
+    """The areas a CV is suggested for when a vacancy opens.
+
+    Its best area, and also its second best area only when that one is nearly as strong
+    (within POOL_CLOSE_POINTS). Both must score at least POOL_MIN_SCORE and show real
+    evidence. So a CV is never spread over every area where its skills list happens to fit."""
+    good = good_areas(area_scores)
+    if not good:
+        return []
+    best = good[0][1]
+    return [k for k, sc in good if sc >= best - config.POOL_CLOSE_POINTS][:config.POOL_SUGGEST_AREAS]
 
 
 def shortlist_status(score: int) -> str:
@@ -206,8 +271,9 @@ def best_area_by_rules(profile: dict, cv_text: str, areas: list) -> tuple[str, i
     """The area with the highest score by rules. Returns (name, score, share of required skills found)."""
     best = ("", -1, 0.0)
     cv = CVText(cv_text)
+    shared = shared_terms(areas)
     for a in areas:
-        total, _, _ = score_cv(profile, cv_text, a)
+        total, _, _ = score_cv(profile, cv_text, a, shared)
         if total is None:
             continue
         req = a.required_skills or []
@@ -268,8 +334,8 @@ def template_draft(kind: str, facts: dict) -> dict:
         return {"subject": f"Offer - {area}",
                 "body": (f"Dear {first},\n\nCongratulations. We are happy to tell you that you have been selected "
                          f"for the {area} position.\n\nYour work ID is {facts.get('work_id')}. "
-                         f"Please use it in all messages with us.\n\nOur team will contact you soon with the "
-                         f"onboarding details and the documents to sign.\n\n{SIGN_OFF}")}
+                         f"Please use it in all messages with us. Your placement letter is attached to this "
+                         f"email.\n\nOur team will contact you soon with the onboarding details.\n\n{SIGN_OFF}")}
     if kind == "hold":
         return {"subject": "Update on your interview",
                 "body": (f"Dear {first},\n\nThank you for attending the interview for the {area} position. "

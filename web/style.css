@@ -92,6 +92,7 @@ ul.clean li + li, ol.clean li + li { margin-top: 4px; }
 .btn.link:hover { text-decoration: underline; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.actions .spacer { flex: 1; }
 input[type=text], input[type=email], input[type=search], select, textarea { width: 100%; border: 1px solid #bbb; border-radius: 3px; padding: 6px 8px; background: #fff; }
 input:focus, select:focus, textarea:focus { outline: 2px solid #9fc2ef; outline-offset: 0; border-color: var(--accent); }
 textarea { resize: vertical; min-height: 90px; }
@@ -120,6 +121,7 @@ table.t td.num-col, table.t th.num-col { text-align: right; }
 
 /* ---------- add CV ---------- */
 .add-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; align-items: start; }
+.upload-result { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 .drop { display: block; border: 1px dashed #aaa; border-radius: 4px; padding: 28px 16px; text-align: center; background: #fcfcfc; cursor: pointer; }
 .drop.over { border-color: var(--accent); background: #f2f6fb; }
 
@@ -131,6 +133,7 @@ table.t td.num-col, table.t th.num-col { text-align: right; }
 .mail-body { padding: 12px; white-space: pre-wrap; }
 .mail-body.editing { white-space: normal; }
 .mail-foot { padding: 8px 12px; border-top: 1px solid var(--line); }
+.mail-attach { padding: 8px 12px; border-top: 1px solid var(--line-soft); }
 .warn { padding: 6px 12px; color: var(--need); background: var(--need-bg); border-bottom: 1px solid var(--need-line); font-size: 13px; }
 
 /* ---------- misc ---------- */

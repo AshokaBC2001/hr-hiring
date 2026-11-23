@@ -33,11 +33,10 @@ APP_PORT = int(os.environ.get("HR_APP_PORT", "8000"))
 WEIGHTS = {"skills": 40, "projects": 30, "education": 20, "experience": 10}
 SHORTLIST_AT = 60      # 60 or above: Shortlisted
 BORDERLINE_AT = 50     # 50 to 59: the HR officer decides; below 50: Not shortlisted (HR officer confirms)
-RELEVANT_EDUCATION = [
-    "computer science", "computing", "information technology", "software engineering",
-    "data science", "computer engineering", "electronic", "electrical", "information systems",
-    "artificial intelligence", "engineering", "ict",
-]
+# Each area has its own list of related studies (in shared/areas.json and on the Areas page),
+# so a degree only gives full education points for the areas it really fits.
+SHARED_SKILL_AREAS = 3     # a skill or keyword listed by more than this many areas (for example
+                           # Excel, SQL, Communication) does not on its own make a project "related"
 
 # ---- Limits ----------------------------------------------------------------------
 MAX_FIXES = 2              # after a failed check the model gets this many more tries
@@ -61,6 +60,9 @@ STALLED_AFTER_HOURS = {
 # ---- The CV pool ------------------------------------------------------------------
 POOL_MIN_SCORE = 50        # an area's ranked list only shows CVs scoring this or more for that area
 POOL_OTHER_AREAS = 3       # how many other good areas are shown for each CV
+POOL_CLOSE_POINTS = 10     # a CV is also suggested for its second best area only if that area is
+                           # within this many points of its best area
+POOL_SUGGEST_AREAS = 2     # the most areas one CV is suggested for at the same time
 POOL_EXPIRE_DAYS = 182     # CVs waiting in the pool longer than this (about 6 months) are archived
 
 # ---- Talent Hub: the intern records (read only; we never write to Talent Hub) -------
@@ -121,5 +123,5 @@ HR_STATUSES = {"needs_person", "needs_area", "borderline", "not_shortlisted_chec
 RELEASE_STATUSES = {"invite_ready", "hold_note_ready", "reply_ready", "offer_ready"}
 # CVs waiting in the pool (not in the hiring flow yet). The HR officer invites from here.
 POOL_STATUSES = {"in_pool", "no_area"}
-# Statuses that are shown on the Pool page and not on the Candidates page.
+# Statuses that are shown in the CV pool (Add CV page) and not on the Candidates page.
 NOT_IN_HIRING = POOL_STATUSES | {"archived"}

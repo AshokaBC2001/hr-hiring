@@ -24,7 +24,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import func, select
 
-from . import checks, config, db, llm, talenthub, tools, vacancies
+from . import checks, config, db, letters, llm, talenthub, tools, vacancies
 from .employees import EMPLOYEES, StepResult, ask_checked
 
 # ---- What each employee is doing (shown on the AI team page) ------------------------
@@ -245,7 +245,7 @@ def r_skill_gap(s: RecruiterState) -> RecruiterState:
 
 def r_add_to_pool(s: RecruiterState) -> RecruiterState:
     started = time.time()
-    others = tools.top_areas(s.get("area_scores", {}), skip=(s["area"],), n=config.POOL_OTHER_AREAS)
+    others = tools.good_areas(s.get("area_scores", {}), skip=(s["area"],), n=config.POOL_OTHER_AREAS)
     _record("recruiter", "add-to-pool", s["cid"], started)
     text = f"Added to the pool. Best area: {s['area']} ({s['score']} of 100)."
     if others:
@@ -500,8 +500,23 @@ def o_draft_acceptance(s: OnboardingState) -> OnboardingState:
     _doing("onboarding", "Writing an acceptance email")
     c = s["c"]
     facts = _facts(c, work_id=str(s["work_id"]))
-    d = _draft("onboarding", "draft-acceptance", "acceptance", s["cid"], facts, [c["area"], str(s["work_id"])])
+    d = _draft("onboarding", "draft-acceptance", "acceptance", s["cid"], facts,
+               [c["area"], str(s["work_id"]), "placement letter"])
     return {"drafts": [d], "events": s["events"] + [f"Drafted the acceptance email ({d['written_by']})."]}
+
+
+def o_placement_letter(s: OnboardingState) -> OnboardingState:
+    """Plain code fills the letter template; the model does not write the letter."""
+    started = time.time()
+    _doing("onboarding", "Making the placement letter")
+    try:
+        name = letters.make(s["cid"])
+        _record("onboarding", "placement-letter", s["cid"], started, note=name)
+        text = f"Made the placement letter ({name}). It is attached to the acceptance email."
+    except Exception as e:                     # the email can still be checked; the letter is made at release
+        _record("onboarding", "placement-letter", s["cid"], started, outcome="error", note=str(e)[:200])
+        text = f"Could not make the placement letter yet: {e}"
+    return {"events": s["events"] + [text]}
 
 
 def o_checklist(s: OnboardingState) -> OnboardingState:
@@ -521,12 +536,13 @@ def o_save(s: OnboardingState) -> OnboardingState:
 def _build_onboarding():
     g = StateGraph(OnboardingState)
     for name, fn in [("load", o_load), ("issue_work_id", o_issue_work_id), ("draft_acceptance", o_draft_acceptance),
-                     ("induction_checklist", o_checklist), ("save", o_save)]:
+                     ("placement_letter", o_placement_letter), ("induction_checklist", o_checklist), ("save", o_save)]:
         g.add_node(name, fn)
     g.add_edge(START, "load")
     g.add_edge("load", "issue_work_id")
     g.add_edge("issue_work_id", "draft_acceptance")
-    g.add_edge("draft_acceptance", "induction_checklist")
+    g.add_edge("draft_acceptance", "placement_letter")
+    g.add_edge("placement_letter", "induction_checklist")
     g.add_edge("induction_checklist", "save")
     g.add_edge("save", END)
     return g.compile()

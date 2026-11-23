@@ -20,13 +20,15 @@ A local, AI-assisted hiring workflow. Four AI agents handle the routine work of 
 - Local LLM (Gemma 3 4B by default) served by llama.cpp. No cloud API keys needed.
 - Scores are calculated by code, not by the model.
 - Every model answer is checked against the CV before it is saved.
-- Emails are drafted only. Nothing is sent. Released emails are saved to `data/outbox/`.
+- Emails are drafted only. Nothing is sent. Released emails are saved to `data/outbox/` as `.eml` files
+  (double-click one to open it in Mail or Outlook).
+- After a Pass, a placement letter (plain A4 PDF) is made by code and attached to the acceptance email.
 - Plain web UI with two roles: HR officer and interviewer.
 
 ## Tech stack
 
 Python, FastAPI, LangGraph, SQLAlchemy (SQLite), APScheduler, llama.cpp, pymongo (to read Talent Hub),
-and plain HTML, CSS and JavaScript.
+fpdf2 (placement letter PDF), and plain HTML, CSS and JavaScript.
 
 ## Requirements
 
@@ -76,15 +78,18 @@ If you see "permission denied", run `bash start_model.sh` and `bash start_app.sh
 ## Quick demo
 
 1. Use the **Role** dropdown (top right) to choose **HR Officer**. Go to **Add CV** and click **Load the sample CVs**.
-2. Open the **Pool** page while the Recruiter reads the CVs and adds them to the pool. With a local 4B model this can take a minute or more per CV.
-3. Choose an area in the Pool (for example **AI/ML**) to see its ranking: only CVs scoring 50 or more for that area are shown. Open the top candidate and click **Invite to interview**. The Coordinator books a slot and drafts the invitation.
+2. The new CVs appear in the **CV pool** under the upload box, marked **New**, while the Recruiter reads them and fills in each area and score. With a local 4B model this can take a minute or more per CV.
+3. Choose an area in the CV pool (for example **AI/ML**) to see its ranking: only CVs scoring 50 or more for that area, with a related project, job or studies, are shown. Open the top candidate and click **Invite to interview**. The Coordinator books a slot and drafts the invitation.
 4. Open **Interns** and click **Sync now**. The intern records are read, and the Planner opens a vacancy
    for every area where interns are about to finish.
 5. Open **Vacancies**. Each one lists the best waiting CVs for that area, plus 2 reserves. Click **Approve**
    on one: the candidate leaves the pool, and the Coordinator books a slot and drafts the invitation.
 6. Open **Replies** and release the interview invitation.
 7. Switch the role to **Interviewer**, open **Interviews**, pick a candidate and record **Pass**.
-8. Switch back to **HR Officer**. Onboarding issues employee ID **1001** and drafts the offer email. Release it to close the application.
+8. Switch back to **HR Officer**. Onboarding issues employee ID **1001**, drafts the offer email and makes the
+   placement letter. The dates are set automatically: the Monday after the interview, for six months. Open the
+   candidate, click **Preview** in the **Placement letter** box (change the dates there if needed), then release the
+   offer email (with the letter attached) to close the application.
    The vacancy now shows one place filled. If you record **Fail** instead, the next best CV from the pool is suggested in its place.
 9. Click **Write brief now** on the Dashboard to see the daily summary. The **AI team** page shows each agent, its routines and every step it took.
 
@@ -94,11 +99,13 @@ If you see "permission denied", run `bash start_model.sh` and `bash start_app.sh
 HR officer adds CVs (several at once)
   -> Recruiter:    read CV -> duplicate check -> choose best area -> score for every area -> skill gaps -> add to pool
        "Waiting in pool" (best area and score) | "No matching area" (read again when areas change)
-  -> CV pool:      ranked per area (50 or more), 3 other good areas per CV, archived after 6 months
+  -> CV pool:      on the Add CV page; ranked per area (50 or more), 3 other good areas per CV,
+                   archived after 6 months
 
 Talent Hub (read only)
   -> Planner:      read intern records -> interns finishing within 7 days -> a vacancy for their area
                    -> suggest the top CVs from the pool (places + 2 reserves)
+                   -> each CV only for its best area, or a second area within 10 points
   -> HR officer:   Approve a suggestion (or Invite from the pool directly) -> Shortlisted
   -> Coordinator:  interview slot -> questions -> invitation draft    -> HR officer releases
   -> Interviewer:  Pass / Fail / Hold
@@ -118,7 +125,12 @@ Talent Hub (read only)
   - emails must contain the correct name, area, date and ID, with no invented numbers or placeholders;
   - a failed check is sent back to the model (up to 2 retries), then the agent falls back to rules or a template and flags the candidate;
   - the score is calculated by code: skills 40, projects 30, education 20, experience 10;
-  - employee IDs are issued by code only after a Pass, starting at 1001, never reused.
+  - education gets full points only for the area's own related studies (for example a Computer
+    Science degree for AI/ML, a Human Resource Management degree for Human Resources);
+  - a CV is suggested for an area only with real evidence for it (a related project, job or
+    studies), not just a skills list, and only for its best area or a second area within 10 points;
+  - employee IDs are issued by code only after a Pass, starting at 1001, never reused;
+  - the placement letter is filled in by code from a template, never written by the model.
 - **Lessons:** when a check fails, the agent saves a short lesson (no personal data) in `data/notes/` and uses it next time.
 - **No forced areas:** the model may suggest a new area, but only a person can add one.
 
@@ -126,10 +138,14 @@ Talent Hub (read only)
 
 | What | Where |
 |---|---|
-| Areas and required skills | **Areas** page |
+| Areas, required skills and related studies | **Areas** page |
+| Which areas a CV is suggested for | `POOL_MIN_SCORE`, `POOL_CLOSE_POINTS`, `POOL_SUGGEST_AREAS`, `SHARED_SKILL_AREAS` in `hiring/config.py` |
 | Talent Hub: source, address and field names | `TALENTHUB_*` in `hiring/config.py` |
 | Days of notice before a place opens, and reserves | `VACANCY_NOTICE_DAYS`, `VACANCY_RESERVES` in `hiring/config.py` |
 | Score weights and thresholds | `hiring/config.py` |
+| Placement letter wording | `employees/onboarding/templates/placement-letter.md` |
+| Letter department and sender | `shared/letter/letter.json` |
+| Placement length (6 months) | `PLACEMENT_MONTHS` in `hiring/letters.py` |
 | Agent instructions | `employees/<agent>/ROLE.md` and `routines/<routine>/SKILL.md` |
 | Agent schedule | `employees/<agent>/SCHEDULE.md` |
 | Model | The model name in `start_model.sh` (any GGUF model on Hugging Face, for example a Qwen3 4B Instruct build) |
@@ -146,10 +162,12 @@ run.py                                   CLI helpers: check, samples, once, brie
 employees/                               the 5 AI agents (Markdown)
 shared/areas.json                        starter areas
 shared/example_interns.json              made-up intern records (until Talent Hub access is granted)
+shared/letter/                           letter settings and the font (DejaVu Sans)
 hiring/
   config.py     settings               db.py         database (SQLite)
   llm.py        llama-server client    checks.py     checks on model answers
   talenthub.py  reads Talent Hub       vacancies.py  vacancies and suggestions
+  letters.py    placement letter PDF and the .eml email files
   tools.py      CV reading, scoring, scheduling, templates
   employees.py  loads agent folders, checked model calls
   flows.py      LangGraph workflows    scheduler.py  APScheduler jobs
@@ -157,7 +175,7 @@ hiring/
 web/                                     front end (HTML, CSS, JavaScript)
 samples/                                 sample CVs (fictional people)
 tests/                                   tests and a fake model server
-data/                                    created at runtime: database, inbox, outbox, logs, notes
+data/                                    created at runtime: database, inbox, outbox, letters, logs, notes
 ```
 
 ## Testing
@@ -191,6 +209,8 @@ To refresh the made-up intern records so the demo dates are near today:
   can open a vacancy by hand for that.
 - One leaving intern is treated as one place. There is no "how many places does this area have" field.
 - One model call at a time.
+- The placement letter is a plain A4 page without a logo or signature line. The font prints Latin letters with accents,
+  Greek and Cyrillic; names written in Sinhala or Tamil script need another font and text shaping.
 
 ## Troubleshooting
 
@@ -206,4 +226,8 @@ To refresh the made-up intern records so the demo dates are near today:
 
 ## Acknowledgements
 
-The Markdown agent structure (ROLE, SCHEDULE, RELEASES and SKILL files) follows the idea from [markfulton/ai-employees](https://github.com/markfulton/ai-employees). All people in `samples/` are fictional.
+- The Markdown agent structure (ROLE, SCHEDULE, RELEASES and SKILL files) follows the idea from [markfulton/ai-employees](https://github.com/markfulton/ai-employees).
+- The placement letter feature follows the approach of [faizanfirdousi/appointment-letter-automation](https://github.com/faizanfirdousi/appointment-letter-automation) (MIT license): a letter template and an email template, with the letter PDF attached to the email.
+- The PDF is made with [fpdf2](https://github.com/py-pdf/fpdf2) (LGPL-3.0), installed as a library.
+- The letter font is DejaVu Sans (Bitstream Vera license, see `shared/letter/fonts/LICENSE.txt`).
+- All people in `samples/` are fictional.

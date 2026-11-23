@@ -119,6 +119,7 @@ class FakeModel:
             return {"subject": f"Welcome to the {area} team",
                     "body": (f"Dear {first},\n\nCongratulations! You have been selected for the {area} position. "
                              f"Your work ID is {f.get('work_id')}. Please use it in all your messages with us. "
+                             f"Your placement letter is attached to this email. "
                              f"Our team will contact you soon with the onboarding details.{sign}")}
         if routine == "reply-failed-or-hold" and f.get("message_type") == "hold":
             return {"subject": "Your interview result",

@@ -11,6 +11,7 @@ Write a short, warm email to tell the candidate they have been selected for the 
 - Greet the candidate by first name and congratulate them.
 - Say the area exactly as given in the facts.
 - Give the work ID exactly as given in the facts, and ask them to use it in all messages.
+- Say that their placement letter is attached to this email.
 - Say the team will contact them with the onboarding details.
 - End with: "Kind regards," and "Hiring Team".
 - Use only the facts. Do not add dates, numbers, links or names.
@@ -20,4 +21,5 @@ Reply with one JSON object only:
 {"subject": "", "body": ""}
 
 ## Checks (plain code)
-Name, area and work ID must be in the email; no other numbers; no placeholders.
+Name, area, work ID and the words "placement letter" must be in the email; no other numbers;
+no placeholders.

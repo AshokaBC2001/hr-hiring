@@ -63,7 +63,7 @@ def routines(key: str) -> list[dict]:
         "recruiter": ["parse-cv", "duplicate-check", "choose-area", "score-match", "skill-gap", "add-to-pool"],
         "coordinator": ["invite-and-slots", "prepare-questions", "reply-not-shortlisted", "update-register",
                         "reply-failed-or-hold"],
-        "onboarding": ["issue-work-id", "draft-acceptance", "induction-checklist"],
+        "onboarding": ["issue-work-id", "draft-acceptance", "placement-letter", "induction-checklist"],
         "chief-of-staff": ["read-run-logs", "archive-old-cvs", "flag-stalled", "morning-brief"],
         "planner": ["sync-interns", "find-vacancies", "suggest-candidates"],
     }.get(key, [])

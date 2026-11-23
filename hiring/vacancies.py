@@ -4,6 +4,7 @@ All of this is plain code. The model never decides who gets a place.
 
     interns finishing in the next few days  ->  an open vacancy for their area
     the vacancy                             ->  the top CVs from the pool are suggested
+                                                (each CV only for its best area, or a close second)
     the HR officer approves a suggestion    ->  the candidate joins the normal hiring flow
     the candidate passes the interview      ->  one place is filled
     the candidate fails or is closed        ->  the next best CV is suggested instead
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from . import config, db
+from . import config, db, tools
 
 # What a suggestion can be:
 #   suggested  waiting for the HR officer
@@ -31,35 +32,48 @@ def _summary(c: db.Candidate, area: str) -> dict:
             "gaps": v.get("gaps", []), "state": "suggested", "at": db.now()}
 
 
+def fits(c: db.Candidate, area: str) -> bool:
+    """True when this CV may be suggested for this area: it must be the CV's best area,
+    or a second area that is nearly as strong. See tools.suggest_areas."""
+    return area in tools.suggest_areas(c.area_scores or {})
+
+
 def pool_for_area(area: str, skip: set[str] = frozenset()) -> list[db.Candidate]:
-    """CVs waiting in the pool that score enough for this area, best first."""
+    """CVs waiting in the pool that fit this area, best first."""
     rows = []
     for c in db.candidates_in(config.POOL_STATUSES):
-        if c.app_no in skip or c.vacancy_id:
+        if c.app_no in skip or c.vacancy_id or not fits(c, area):
             continue
-        v = (c.area_scores or {}).get(area)
-        if v and v["score"] >= config.POOL_MIN_SCORE:
-            rows.append((v["score"], -c.id, c))
+        rows.append((c.area_scores[area]["score"], -c.id, c))
     rows.sort(key=lambda x: (-x[0], -x[1]))
     return [c for _, _, c in rows]
 
 
 def refresh_suggestions(v: db.Vacancy) -> int:
-    """Tops the suggestion list back up from the pool. Returns how many were added."""
+    """Tops the suggestion list back up from the pool. Returns how many were added.
+
+    First it takes away suggestions still waiting for the HR officer that no longer fit:
+    the CV left the pool, or after scoring again this is not its best area any more."""
     if v.status != "open":
         return 0
-    suggestions = [dict(s) for s in (v.suggestions or [])]
+    in_pool = {c.app_no: c for c in db.candidates_in(config.POOL_STATUSES)}
+    suggestions, removed = [], 0
+    for s in (v.suggestions or []):
+        c = in_pool.get(s["app_no"])
+        if s["state"] == "suggested" and (c is None or c.vacancy_id or not fits(c, v.area)):
+            removed += 1
+            continue
+        suggestions.append(dict(s))
     live = [s for s in suggestions if s["state"] in LIVE]
     want = v.places + config.VACANCY_RESERVES
-    if len(live) >= want:
-        return 0
     used = {s["app_no"] for s in suggestions}
     added = []
-    for c in pool_for_area(v.area, skip=used):
-        if len(live) + len(added) >= want:
-            break
-        added.append(_summary(c, v.area))
-    if added:
+    if len(live) < want:
+        for c in pool_for_area(v.area, skip=used):
+            if len(live) + len(added) >= want:
+                break
+            added.append(_summary(c, v.area))
+    if added or removed:
         db.update_vacancy(v.id, suggestions=suggestions + added)
     return len(added)
 

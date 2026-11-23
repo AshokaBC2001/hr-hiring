@@ -19,8 +19,8 @@ if (!["hr", "interviewer"].includes(ROLE)) ROLE = "hr";
 let STATE = null;
 let lastHTML = "";
 let current = { page: "", arg: "" };
-const UI = { showCv: false, showRuns: false, editDraft: null, editEmail: false, candFilter: "selected", candQuery: "",
-             poolArea: "", poolShow: "all", poolQuery: "",
+const UI = { showCv: false, showRuns: false, editDraft: null, editEmail: false, letterDates: null, candFilter: "selected", candQuery: "",
+             poolArea: "", poolShow: "all", poolQuery: "", cvEmail: "",
              vacShow: "open", internShow: "all", internQuery: "",
              repliesTab: "waiting", showAll: "", files: [], uploadResults: null, areas: null };
 
@@ -105,7 +105,7 @@ function confirmBox({ heading, text, ok = "Confirm", danger = false }) {
 
 // ---------------------------------------------------------------- frame: top menu, model, role
 const NAV = {
-  hr: [["dashboard", "Dashboard"], ["add", "Add CV"], ["pool", "Pool"], ["vacancies", "Vacancies", "vacancies"],
+  hr: [["dashboard", "Dashboard"], ["add", "Add CV"], ["vacancies", "Vacancies", "vacancies"],
        ["candidates", "Candidates"], ["review", "Review queue", "review"], ["replies", "Replies", "release"],
        ["interns", "Interns"], ["areas", "Areas"], ["team", "AI team"]],
   interviewer: [["interviews", "Interviews", "interview"], ["team", "AI team"]],
@@ -116,8 +116,8 @@ function renderFrame() {
   const t = STATE ? STATE.tiles : {};
   $("#nav").innerHTML = NAV[ROLE].map(([key, label, countKey]) => {
     const count = countKey && t[countKey] ? `<span class="count">${esc(t[countKey])}</span>` : "";
-    const onCandidate = current.page === "candidate" && (key === (UI.candidateInPool ? "pool" : "candidates"));
-    const on = current.page === key || onCandidate || (key === "interviews" && current.page === "interview");
+    const onCandidate = current.page === "candidate" && (key === (UI.candidateInPool ? "add" : "candidates"));
+    const on = current.page === key || onCandidate || (key === "interviews" && current.page === "interview") || (key === "add" && current.page === "pool");
     return `<a class="${on ? "on" : ""}" href="#/${key}">${esc(label)}${count}</a>`;
   }).join("");
   $("#brand").href = HOME[ROLE];
@@ -173,8 +173,9 @@ function mailBlock(d, { showCandidate = false } = {}) {
          <button class="btn" data-act="edit-draft" data-id="${d.id}">Edit</button>
          ${d.can_release ? "" : `<span class="small muted">${esc(d.release_blocker || "The candidate is not at this step now.")}</span>`}</div>`;
   } else if (d.status === "released") {
-    foot = `<span class="small muted">Released ${esc(fmtTime(d.released_at))}. Saved to data/outbox/${esc(d.file)} (not sent).</span>`;
+    foot = `<span class="small muted">Released ${esc(fmtTime(d.released_at))}. Saved to data/outbox/${esc(d.file)} (not sent). Double-click the file to open it in Mail.</span>`;
   }
+  const attach = d.attachment ? `<div class="mail-attach small">Attachment: <a href="/api/candidates/${encodeURIComponent(d.app_no)}/letter" target="_blank" rel="noopener">${esc(d.attachment)}</a> <span class="muted">(placement letter, made by code)</span></div>` : "";
   const body = editing
     ? `<div class="mail-body editing"><div class="form-row"><label for="ed-subject">Subject</label><input type="text" id="ed-subject" value="${esc(d.subject)}"></div>
        <div class="form-row"><label for="ed-body">Email</label><textarea id="ed-body" rows="12">${esc(d.body)}</textarea></div></div>`
@@ -182,7 +183,7 @@ function mailBlock(d, { showCandidate = false } = {}) {
   return `<div class="mail" id="mail-${d.id}">
     <div class="mail-head"><b>${esc(d.kind_label)}</b>${state}${byText(d.written_by)}<span class="grow"></span>
       ${showCandidate ? candLink(d.app_no) : ""}<span class="small muted">To: ${esc(d.name || "")} ${d.email ? "&lt;" + esc(d.email) + "&gt;" : "(no email yet)"}</span></div>
-    ${notes}${body}${foot ? `<div class="mail-foot">${foot}</div>` : ""}</div>`;
+    ${notes}${body}${attach}${foot ? `<div class="mail-foot">${foot}</div>` : ""}</div>`;
 }
 
 // ================================================================ HR officer pages
@@ -199,7 +200,7 @@ async function pDashboard() {
   else if (!s.total) next = notice("ok", "No CVs yet.", "Add a CV to start, or load the sample CVs.", `<a class="btn primary" href="#/add">Add CV</a>`);
   else next = notice("ok", "Nothing needs you right now.", "The AI team is handling the rest.");
   const nums = [
-    ["New CVs", t.new, "#/pool/recent", false],
+    ["New CVs", t.new, "#/add/recent", false],
     ["Vacancies to fill", s.vacancies.places, "#/vacancies", t.vacancies > 0],
     ["Needs your review", t.review, "#/review", t.review > 0],
     ["Emails to release", t.release, "#/replies", t.release > 0],
@@ -239,17 +240,44 @@ async function pDashboard() {
     </div>`);
 }
 
-async function pAdd() {
+const POOL_SHOW = [["all", "All"], ["recent", "Recently added"], ["no_area", "No matching area"], ["archived", "Archived"]];
+async function pAdd(arg) {
   title("Add CV");
+  if (POOL_SHOW.some((x) => x[0] === arg)) UI.poolShow = arg;
+  const qs = new URLSearchParams({ area: UI.poolArea, show: UI.poolShow, q: UI.poolQuery });
+  const r = await api(`/api/pool?${qs}`);
+  if (UI.poolArea && !r.area) UI.poolArea = "";
   const files = UI.files;
-  const results = UI.uploadResults;
-  const resultTable = results ? `<table class="t"><thead><tr><th>File</th><th>Result</th><th>Application</th></tr></thead><tbody>
-      ${results.map((r) => r.ok
-        ? `<tr class="click" data-href="#/candidate/${encodeURIComponent(r.app_no)}"><td>${esc(r.file)}</td><td>Added</td><td>${candLink(r.app_no)}</td></tr>`
-        : `<tr><td>${esc(r.file)}</td><td>${tag("Not added", "fail")} <span class="small muted">${esc(r.reason)}</span></td><td>-</td></tr>`).join("")}</tbody></table>` : "";
+  const results = UI.uploadResults || [];
+  const added = new Set(results.filter((x) => x.ok).map((x) => x.app_no));
+  const notAdded = results.filter((x) => !x.ok);
   const fileTable = files.length ? `<table class="t" style="margin-top:10px"><thead><tr><th>Chosen file</th><th>Size</th><th></th></tr></thead><tbody>
       ${files.map((f, i) => `<tr><td>${esc(f.name)}</td><td class="small muted">${Math.ceil(f.size / 1024)} KB</td>
         <td style="text-align:right"><button class="btn small" data-act="remove-file" data-i="${i}">Remove</button></td></tr>`).join("")}</tbody></table>` : "";
+  const resultLine = results.length ? `<div class="upload-result">
+      ${added.size ? `<p class="small" style="margin:0">${added.size} CV(s) added. They are at the top of the list below, marked New. The Recruiter reads each one and fills in its area and score.</p>` : ""}
+      ${notAdded.length ? `<table class="t" style="margin-top:6px"><tbody>${notAdded.map((x) => `<tr><td>${esc(x.file)}</td><td>${tag("Not added", "fail")} <span class="small muted">${esc(x.reason)}</span></td></tr>`).join("")}</tbody></table>` : ""}</div>` : "";
+
+  const st = r.stats;
+  const counts = `<span class="small muted">${esc(st.in_pool)} in pool, ${esc(st.being_read)} being read, ${esc(st.added_today)} added today</span>`;
+  const hint = UI.poolArea ? `Ranked by score for ${UI.poolArea}. Only CVs scoring ${r.min_score} or more with a related project, job or studies are shown.`
+    : UI.poolShow === "recent" ? "CVs added in the last 24 hours, newest first."
+    : UI.poolShow === "archived" ? "Archived CVs are not deleted. Open one to restore it."
+    : UI.poolShow === "no_area" ? "No area on the list fits these CVs. They are read again when you add or change an area."
+    : "All waiting CVs, sorted by their best score. Choose an area to see its ranking.";
+  const rows = r.rows.length ? `<table class="t list pool-list"><thead><tr><th class="num-col">Rank</th><th>Candidate</th><th>Best area</th>
+      <th class="num-col">${UI.poolArea ? "Score for " + esc(UI.poolArea) : "Score"}</th><th>Other good areas</th><th>Skill gaps</th><th>Added</th><th>Status</th></tr></thead><tbody>
+    ${r.rows.map((c) => `<tr class="click" data-href="#/candidate/${encodeURIComponent(c.app_no)}">
+      <td class="num-col">${c.rank ?? "-"}</td>
+      <td>${esc(c.name || "Reading…")} ${added.has(c.app_no) ? tag("New") : ""}<div class="small muted">${esc(c.app_no)}</div></td>
+      <td>${c.best_area ? esc(c.best_area) : c.suggested_new_area ? `<span class="small muted">Suggested: ${esc(c.suggested_new_area)}</span>` : `<span class="muted">-</span>`}</td>
+      <td class="num-col">${(UI.poolArea ? c.area_score : c.best_score) ?? "-"}</td>
+      <td class="small">${c.other_areas.length ? c.other_areas.map((o) => `${esc(o.area)} ${esc(o.score)}`).join(", ") : `<span class="muted">-</span>`}</td>
+      <td class="small muted">${c.gaps.length ? esc(c.gaps.join(", ")) : "-"}</td>
+      <td class="small muted">${esc(fmtTime(c.created_at))}</td>
+      <td>${statusTag(c)}</td></tr>`).join("")}</tbody></table>`
+    : empty(UI.poolArea ? `No CV in the pool fits ${UI.poolArea} yet.` : UI.poolQuery ? "No CV matches your search." : "No CVs here.");
+
   setView(`<div class="box">${boxHead("Add CVs")}
       <div class="add-grid">
         <div>
@@ -260,29 +288,30 @@ async function pAdd() {
         </div>
         <div>
           <div class="form-row"><label for="cv-email">Candidate's email (optional)</label>
-            <input type="email" id="cv-email" placeholder="${files.length > 1 ? "Only for a single CV" : "name@example.com"}" ${files.length > 1 ? "disabled" : ""}>
+            <input type="email" id="cv-email" value="${files.length > 1 ? "" : esc(UI.cvEmail)}" placeholder="${files.length > 1 ? "Only for a single CV" : "name@example.com"}" ${files.length > 1 ? "disabled" : ""}>
             <div class="help">If you type it, replies use this address. If you leave it empty, the Recruiter reads it from the CV and you confirm it.</div></div>
           <p class="small muted">${files.length ? `${files.length} file(s) chosen.` : "No files chosen yet."}</p>
           <div class="actions"><button class="btn primary" data-act="upload" ${files.length ? "" : "disabled"}>Add ${files.length > 1 ? files.length + " CVs" : "CV"}</button>
-            ${files.length ? `<button class="btn" data-act="clear-files">Clear</button>` : ""}</div>
+            ${files.length ? `<button class="btn" data-act="clear-files">Clear</button>` : ""}
+            <span class="spacer"></span><button class="btn" data-act="samples" title="17 made-up CVs in PDF, Word and text files, for demos and testing">Load the sample CVs</button></div>
         </div>
-      </div></div>
-    ${results ? `<div class="box">${boxHead("Result", `<a class="btn small" href="#/pool/recent">View in Pool</a>`)}${resultTable}
-      <p class="small muted" style="margin:8px 0 0">The Recruiter reads each CV and adds it to the Pool with its best area and score.</p></div>` : ""}
-    <div class="box">${boxHead("What happens next")}<ol class="clean">
-      <li><b>Recruiter</b> reads the CV, chooses the best area, scores it for every area and adds it to the Pool. Every fact is checked against the CV.</li>
-      <li><b>You</b> pick candidates from the Pool and invite them to an interview.</li>
-      <li><b>Coordinator</b> books an interview slot, prepares questions and drafts the invitation for you to release.</li>
-      <li><b>Interviewer</b> does the interview and enters Pass, Fail or Hold.</li>
-      <li><b>Onboarding</b> issues the 4-digit work ID and drafts the acceptance email for you to release.</li></ol></div>
-    <div class="box">${boxHead("Try it with sample CVs")}<p class="small muted" style="margin-top:0">17 made-up candidates in PDF, Word and text files, for demos and testing. Three of them fit none of the areas.</p>
-      <button class="btn" data-act="samples">Load the sample CVs</button></div>`);
+      </div>${resultLine}</div>
+    <div class="box">${boxHead("CV pool", counts)}
+      <div class="filters"><div class="tabs">${POOL_SHOW.map(([k, l]) => `<button class="${UI.poolShow === k ? "on" : ""}" data-act="pool-show" data-s="${k}">${esc(l)}${k === "no_area" && st.no_area ? ` (${esc(st.no_area)})` : ""}${k === "archived" && st.archived ? ` (${esc(st.archived)})` : ""}</button>`).join("")}</div>
+        <select id="pool-area" style="width:auto"><option value="">All areas</option>${r.areas.map((a) => `<option ${a === UI.poolArea ? "selected" : ""}>${esc(a)}</option>`).join("")}</select>
+        <input type="search" class="search" id="pool-q" placeholder="Search name or number" value="${esc(UI.poolQuery)}"></div>
+      <p class="small muted" style="margin:0 0 8px">${esc(hint)}</p>${rows}</div>`);
   const input = $("#file-input");
   input.onchange = () => { addFiles(input.files); input.value = ""; };
   const drop = $("#drop");
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
   drop.ondragleave = () => drop.classList.remove("over");
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles(e.dataTransfer.files); };
+  const em = $("#cv-email");
+  em.oninput = () => { UI.cvEmail = em.value; };
+  $("#pool-area").onchange = (e) => { UI.poolArea = e.target.value; e.target.blur(); lastHTML = ""; pAdd(); };
+  const qi = $("#pool-q");
+  qi.oninput = () => { UI.poolQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pAdd().then(() => { const n = $("#pool-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
 }
 function addFiles(list) {
   for (const f of list) if (!UI.files.some((x) => x.name === f.name && x.size === f.size)) UI.files.push(f);
@@ -316,45 +345,6 @@ async function pCandidates(arg) {
   qi.oninput = () => { UI.candQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pCandidates().then(() => { const n = $("#cand-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
 }
 
-const POOL_SHOW = [["all", "All"], ["recent", "Recently added"], ["no_area", "No matching area"], ["archived", "Archived"]];
-async function pPool(arg) {
-  title("Pool");
-  if (POOL_SHOW.some((x) => x[0] === arg)) UI.poolShow = arg;
-  const qs = new URLSearchParams({ area: UI.poolArea, show: UI.poolShow, q: UI.poolQuery });
-  const r = await api(`/api/pool?${qs}`);
-  if (UI.poolArea && !r.area) UI.poolArea = "";
-  const st = r.stats;
-  const nums = [["CVs in pool", st.in_pool, "all"], ["Being read now", st.being_read, "recent"],
-    ["No matching area", st.no_area, "no_area"], ["Added today", st.added_today, "recent"]]
-    .map(([label, n, show]) => `<a class="num" href="#/pool/${show}"><b>${esc(n)}</b><span>${esc(label)}</span></a>`).join("");
-  const hint = UI.poolArea ? `Ranked by score for ${UI.poolArea}. Only CVs scoring ${r.min_score} or more are shown.`
-    : UI.poolShow === "recent" ? "CVs added in the last 24 hours, newest first."
-    : UI.poolShow === "archived" ? "Archived CVs are not deleted. Open one to restore it."
-    : UI.poolShow === "no_area" ? "No area on the list fits these CVs. They are read again when you add or change an area."
-    : "All waiting CVs, sorted by their best score. Choose an area to see its ranking.";
-  const rows = r.rows.length ? `<table class="t list pool-list"><thead><tr><th class="num-col">Rank</th><th>Candidate</th><th>Best area</th>
-      <th class="num-col">${UI.poolArea ? "Score for " + esc(UI.poolArea) : "Score"}</th><th>Other good areas</th><th>Skill gaps</th><th>Added</th><th>Status</th></tr></thead><tbody>
-    ${r.rows.map((c) => `<tr class="click" data-href="#/candidate/${encodeURIComponent(c.app_no)}">
-      <td class="num-col">${c.rank ?? "-"}</td>
-      <td>${esc(c.name)}<div class="small muted">${esc(c.app_no)}</div></td>
-      <td>${c.best_area ? esc(c.best_area) : c.suggested_new_area ? `<span class="small muted">Suggested: ${esc(c.suggested_new_area)}</span>` : `<span class="muted">-</span>`}</td>
-      <td class="num-col">${(UI.poolArea ? c.area_score : c.best_score) ?? "-"}</td>
-      <td class="small">${c.other_areas.length ? c.other_areas.map((o) => `${esc(o.area)} ${esc(o.score)}`).join(", ") : `<span class="muted">-</span>`}</td>
-      <td class="small muted">${c.gaps.length ? esc(c.gaps.join(", ")) : "-"}</td>
-      <td class="small muted">${esc(fmtTime(c.created_at))}</td>
-      <td>${statusTag(c)}</td></tr>`).join("")}</tbody></table>`
-    : empty(UI.poolArea ? `No CV in the pool scores ${r.min_score} or more for ${UI.poolArea}.` : UI.poolQuery ? "No CV matches your search." : "No CVs here.");
-  setView(`<div class="nums four">${nums}</div>
-    <div class="box">${boxHead("CV pool", `<a class="btn primary" href="#/add">Add CV</a>`)}
-      <div class="filters"><div class="tabs">${POOL_SHOW.map(([k, l]) => `<button class="${UI.poolShow === k ? "on" : ""}" data-act="pool-show" data-s="${k}">${esc(l)}${k === "archived" && st.archived ? ` (${esc(st.archived)})` : ""}</button>`).join("")}</div>
-        <select id="pool-area" style="width:auto"><option value="">All areas</option>${r.areas.map((a) => `<option ${a === UI.poolArea ? "selected" : ""}>${esc(a)}</option>`).join("")}</select>
-        <input type="search" class="search" id="pool-q" placeholder="Search name or number" value="${esc(UI.poolQuery)}"></div>
-      <p class="small muted" style="margin:0 0 8px">${esc(hint)}</p>${rows}</div>`);
-  $("#pool-area").onchange = (e) => { UI.poolArea = e.target.value; e.target.blur(); lastHTML = ""; pPool(); };
-  const qi = $("#pool-q");
-  qi.oninput = () => { UI.poolQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pPool().then(() => { const n = $("#pool-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
-}
-
 const VAC_SHOW = [["open", "Open"], ["done", "Filled and closed"], ["all", "All"]];
 async function pVacancies(arg) {
   title("Vacancies");
@@ -381,7 +371,7 @@ async function pVacancies(arg) {
     return `<div class="box">${boxHead(`${v.area} - ${v.places} place(s)`, head)}
       <p class="small muted" style="margin:0 0 10px">${esc(v.reason)}</p>
       ${v.suggestions.length ? `<table class="t vac-list"><thead><tr><th>Suggested candidate</th><th class="num-col">Score for ${esc(v.area)}</th><th>Skill gaps</th><th>State</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-        : empty(`No CV in the pool scores enough for ${v.area} yet. Add CVs, or check the area's required skills.`)}</div>`;
+        : empty(`No CV in the pool fits ${v.area} yet. A CV is suggested only for its best area, or a second area that is nearly as strong.`)}</div>`;
   };
   setView(`<div class="nums four">${nums}</div>
     <div class="box">${boxHead("Vacancies", `<button class="btn primary" data-act="vac-new">Add vacancy</button>`)}
@@ -491,7 +481,7 @@ async function pCandidate(appNo) {
   if (UI.candidateInPool !== inPool) { UI.candidateInPool = inPool; renderFrame(); }
   const allScores = (c.area_scores || []).length ? `<details class="field"><summary class="label" style="cursor:pointer">Scores for every area (${c.area_scores.length})</summary>
       <table class="t"><tbody>${c.area_scores.map((x) => `<tr><td>${esc(x.area)}</td><td class="num-col">${esc(x.score)}</td></tr>`).join("")}</tbody></table></details>` : "";
-  setView(`${inPool ? `<a class="back" href="#/pool">&larr; Pool</a>` : `<a class="back" href="#/candidates">&larr; All candidates</a>`}
+  setView(`${inPool ? `<a class="back" href="#/add">&larr; CV pool</a>` : `<a class="back" href="#/candidates">&larr; All candidates</a>`}
     <div class="box"><div class="box-head"><h2 style="font-size:18px">${esc(c.name)}</h2><div class="spacer"></div>
       <a class="btn" href="/api/candidates/${encodeURIComponent(c.app_no)}/cv">Download CV</a></div>
       <div class="actions">${esc(c.app_no)} ${statusTag(c)}${c.area ? ` <span>Area: ${esc(c.area)}</span>` : ""}${c.score != null ? ` <span>Score: ${esc(c.score)}/100</span>` : ""}${c.work_id ? ` <b>Work ID ${esc(c.work_id)}</b>` : ""}</div></div>
@@ -522,6 +512,7 @@ async function pCandidate(appNo) {
         <div class="field"><div class="label">Result</div><div>${c.result ? `${resultTag(c.result)} <span class="small muted">${esc(fmtTime(c.result_at))} - decided by the interviewer</span>` : `<span class="muted">Not entered yet</span>`}</div></div>
         ${c.result_comment ? `<div class="field"><div class="label">Interviewer's comment</div><div>${esc(c.result_comment)}</div></div>` : ""}</div>
         <div><div class="label">Questions for the interviewer</div>${c.questions.length ? `<ol class="clean">${c.questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>` : `<span class="muted">-</span>`}</div></div></div>` : ""}
+    ${c.letter ? letterBox(c) : ""}
     ${c.drafts.length ? `<div class="box" id="emails">${boxHead("Emails", `<span class="small muted">Nothing is sent without your release</span>`)}${c.drafts.slice().reverse().map((d) => mailBlock(d)).join("")}</div>` : ""}
     ${c.work_id ? `<div class="box">${boxHead("Onboarding")}
       <div class="grid two"><div><div class="label">Work ID</div><div class="big">${esc(c.work_id)}</div><div class="small muted">Issued by plain code after the Pass. Never reused.</div></div>
@@ -532,6 +523,29 @@ async function pCandidate(appNo) {
       ${UI.showRuns ? `<table class="t" style="margin-top:12px"><thead><tr><th>Time</th><th>Employee</th><th>Routine</th><th>Outcome</th><th class="num-col">Model calls</th><th class="num-col">Seconds</th></tr></thead><tbody>
         ${c.runs.map((r) => `<tr><td class="small muted">${esc(fmtTime(r.at))}</td><td>${esc(r.employee)}</td><td>${esc(r.routine)}</td><td>${outcomeText(r.outcome)}${r.note ? `<div class="small muted">${esc(r.note)}</div>` : ""}</td><td class="num-col">${esc(r.model_calls)}</td><td class="num-col">${esc(r.seconds)}</td></tr>`).join("")}</tbody></table>` : ""}</div>`);
   view.dataset.app = c.app_no;
+  const ls = $("#letter-start"), le = $("#letter-end");
+  if (ls && le) {      // keep typed dates when the page refreshes itself
+    const keepDates = () => { UI.letterDates = { app: c.app_no, start: ls.value, end: le.value }; };
+    ls.oninput = ls.onchange = le.oninput = le.onchange = keepDates;
+  }
+}
+function letterBox(c) {
+  const L = c.letter;
+  const url = `/api/candidates/${encodeURIComponent(c.app_no)}/letter`;
+  const keep = UI.letterDates && UI.letterDates.app === c.app_no ? UI.letterDates : { start: L.start_date, end: L.end_date };
+  const longDate = (v) => (v ? new Date(v + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" }) : "To be confirmed");
+  const dates = L.can_edit && ROLE === "hr"
+    ? `<div class="actions"><div class="form-row" style="margin:0"><label for="letter-start">Start date</label><input type="date" id="letter-start" value="${esc(keep.start)}"></div>
+        <div class="form-row" style="margin:0"><label for="letter-end">End date</label><input type="date" id="letter-end" value="${esc(keep.end)}"></div>
+        <button class="btn primary" data-act="save-letter" style="align-self:flex-end">Save dates</button></div>
+       <div class="help">${L.automatic ? "Filled in automatically: the Monday after the interview, for six months. Change them if needed." : "Dates changed by the HR officer. Clear both and save to go back to the automatic dates."}</div>`
+    : `<div class="field"><div class="label">Start date</div><div>${esc(longDate(L.start_date))}</div></div>
+       <div class="field"><div class="label">End date</div><div>${esc(longDate(L.end_date))}</div></div>`;
+  return `<div class="box" id="letter">${boxHead("Placement letter", L.ready ? tag(L.automatic ? "Automatic dates" : "Dates changed") : ROLE === "hr" && L.can_edit ? tag("Needs dates", "need") : "")}
+    <div class="grid two"><div>${dates}</div>
+      <div><div class="label">The letter</div><div>${esc(L.file)}</div>
+        <div class="small muted">A plain A4 letter made by code from the letter template, attached to the acceptance email.${L.made_at ? " Made " + esc(fmtTime(L.made_at)) + "." : ""}</div>
+        <div class="actions" style="margin-top:8px"><a class="btn" href="${url}" target="_blank" rel="noopener">Preview</a><a class="btn" href="${url}?download=1">Download PDF</a></div></div></div></div>`;
 }
 function outcomeText(o) {
   const m = { ok: ["", "Passed checks"], fixed: ["", "Fixed after a check"], fallback: ["", "Fell back to rules"], stopped: ["fail", "Stopped: model not running"], error: ["fail", "Error"] }[o] || ["", o];
@@ -576,7 +590,7 @@ async function pAreas(arg) {
   setView(`${a.suggested.length ? notice("need", "The AI suggested new areas.", "Add one only if your organisation really offers it. " + a.suggested.map((s) => `${s.name} (${s.count})`).join(", ") + ".",
       `<div class="actions">${a.suggested.map((s) => `<button class="btn small" data-act="area-new" data-name="${esc(s.name)}">Add ${esc(s.name)}</button>`).join("")}</div>`) : ""}
     <div class="box">${boxHead("Areas", `<button class="btn primary" data-act="area-new">Add area</button>`)}
-      <p class="small muted" style="margin-top:0">The Recruiter chooses from these areas. CVs are scored against the required skills (skills 40, projects 30, education 20, experience 10).</p>
+      <p class="small muted" style="margin-top:0">The Recruiter chooses from these areas. CVs are scored against the required skills (skills 40, projects 30, education 20, experience 10). Education gets full points only for the area's related studies.</p>
       <table class="t"><thead><tr><th>Area</th><th>Required skills</th><th>Preferred skills</th><th class="num-col">Candidates</th><th>Status</th><th></th></tr></thead><tbody>
       ${a.areas.map((x) => `<tr><td><b>${esc(x.name)}</b><div class="small muted">${esc(x.description || "No description.")}</div><div class="small muted">Added by ${esc(x.added_by)}</div></td>
         <td>${esc(x.required_skills.join(", ") || "-")}</td><td>${esc(x.preferred_skills.join(", ") || "-")}</td>
@@ -586,12 +600,13 @@ async function pAreas(arg) {
   if (arg && arg.startsWith("new:")) { history.replaceState(null, "", "#/areas"); areaForm(null, arg.slice(4)); }
 }
 function areaForm(area, name = "") {
-  const v = area || { name, description: "", required_skills: [], preferred_skills: [], keywords: [], checklist: [] };
+  const v = area || { name, description: "", required_skills: [], preferred_skills: [], studies: [], keywords: [], checklist: [] };
   openDialog(`<h3>${area ? "Edit area" : "Add area"}</h3><p class="small muted">Separate skills with commas. Only add an area that your organisation really offers.</p>
     <div class="form-row"><label for="af-name">Name</label><input type="text" id="af-name" value="${esc(v.name)}" maxlength="40"></div>
     <div class="form-row"><label for="af-desc">Description</label><textarea id="af-desc" rows="2" style="min-height:50px">${esc(v.description)}</textarea></div>
     <div class="form-row"><label for="af-req">Required skills</label><input type="text" id="af-req" value="${esc(v.required_skills.join(", "))}" placeholder="For example: Recruitment, Interviewing, Excel"><div class="help">Used for the score. At least one.</div></div>
     <div class="form-row"><label for="af-pref">Preferred skills</label><input type="text" id="af-pref" value="${esc(v.preferred_skills.join(", "))}"></div>
+    <div class="form-row"><label for="af-studies">Related studies</label><input type="text" id="af-studies" value="${esc((v.studies || []).join(", "))}" placeholder="For example: Human Resource Management, Psychology, Business"><div class="help">Degrees or subjects that fit this area. They give full education points.</div></div>
     <div class="form-row"><label for="af-kw">Keywords for related projects</label><input type="text" id="af-kw" value="${esc(v.keywords.join(", "))}"></div>
     <div class="form-row"><label for="af-check">Extra onboarding checklist items (one per line)</label><textarea id="af-check" rows="3" style="min-height:60px">${esc(v.checklist.join("\n"))}</textarea></div>
     <div class="actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-dlg="save">Save area</button></div>`);
@@ -599,7 +614,7 @@ function areaForm(area, name = "") {
   d.querySelector('[data-dlg="cancel"]').onclick = closeDialog;
   d.querySelector('[data-dlg="save"]').onclick = async () => {
     const body = { name: $("#af-name").value, description: $("#af-desc").value, required_skills: $("#af-req").value,
-      preferred_skills: $("#af-pref").value, keywords: $("#af-kw").value, checklist: $("#af-check").value, active: area ? area.active : true };
+      preferred_skills: $("#af-pref").value, studies: $("#af-studies").value, keywords: $("#af-kw").value, checklist: $("#af-check").value, active: area ? area.active : true };
     try {
       if (area) await api(`/api/areas/${area.id}`, { method: "PUT", body });
       else await api("/api/areas", { method: "POST", body });
@@ -703,13 +718,13 @@ const ACTS = {
     b.disabled = true;
     try {
       const r = await api("/api/cvs", { method: "POST", form });
-      UI.uploadResults = r.results; UI.files = [];
+      UI.uploadResults = r.results; UI.files = []; UI.cvEmail = ""; UI.poolShow = "recent"; UI.poolArea = "";
       const ok = r.results.filter((x) => x.ok).length;
       toast(ok ? `${ok} CV(s) added. The Recruiter will read them now.` : "No CV was added.", !ok);
     } catch (e) { toast(e.message, true); }
     lastHTML = ""; refreshState(); pAdd();
   },
-  "samples": () => act(async () => { const r = await api("/api/samples", { method: "POST" }); UI.uploadResults = r.results; return r; },
+  "samples": () => act(async () => { const r = await api("/api/samples", { method: "POST" }); UI.uploadResults = r.results; UI.poolShow = "recent"; UI.poolArea = ""; return r; },
     (r) => `${r.results.filter((x) => x.ok).length} sample CV(s) added.`),
   "filter": (b) => { UI.candFilter = b.dataset.f; history.replaceState(null, "", "#/candidates"); current.arg = ""; lastHTML = ""; pCandidates(); },
   "show-all": (b) => { UI.showAll = b.dataset.k; lastHTML = ""; render(); },
@@ -731,14 +746,14 @@ const ACTS = {
   },
   "sync-interns": (b) => { b.disabled = true; act(() => api("/api/interns/sync", { method: "POST" }),
     (r) => `${r.read} record(s) read: ${r.added} new, ${r.updated} changed. ${r.created || 0} new vacancy(ies).`); },
-  "pool-show": (b) => { UI.poolShow = b.dataset.s; history.replaceState(null, "", "#/pool"); current.arg = ""; lastHTML = ""; pPool(); },
+  "pool-show": (b) => { UI.poolShow = b.dataset.s; history.replaceState(null, "", "#/add"); current = { page: "add", arg: "" }; lastHTML = ""; pAdd(); },
   "invite": async () => {
     const area = $("#invite-area").value;
     if (!(await confirmBox({ heading: `Invite to interview for ${area}?`, text: "The candidate leaves the pool. The Coordinator books an interview slot and drafts the invitation for you to release.", ok: "Invite" }))) return;
     act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/invite`, { method: "POST", body: { area } }), (r) => `Invited for ${r.area} (score ${r.score}). The Coordinator takes it from here.`);
   },
   "archive": async () => {
-    if (!(await confirmBox({ heading: "Archive this CV?", text: "It is removed from the pool but not deleted. You can restore it from Pool > Archived.", ok: "Archive" }))) return;
+    if (!(await confirmBox({ heading: "Archive this CV?", text: "It is removed from the pool but not deleted. You can restore it from Add CV, CV pool, Archived.", ok: "Archive" }))) return;
     act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/archive`, { method: "POST" }), "Archived.");
   },
   "restore": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/restore`, { method: "POST" }), "Restored. The Recruiter reads it again."),
@@ -746,6 +761,10 @@ const ACTS = {
   "toggle-runs": () => { UI.showRuns = !UI.showRuns; lastHTML = ""; render(); },
   "edit-email": () => { UI.editEmail = true; lastHTML = ""; render().then(() => $("#email-input")?.focus()); },
   "cancel-email": () => { UI.editEmail = false; lastHTML = ""; render(); },
+  "save-letter": () => act(async () => {
+    await api(`/api/candidates/${encodeURIComponent(current.arg)}/letter`, { method: "POST", body: { start_date: $("#letter-start").value, end_date: $("#letter-end").value } });
+    UI.letterDates = null;
+  }, "Dates saved. The placement letter was made again."),
   "save-email": () => act(async () => { await api(`/api/candidates/${encodeURIComponent(current.arg)}/email`, { method: "POST", body: { email: $("#email-input").value } }); UI.editEmail = false; }, "Email saved."),
   "set-area": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/area`, { method: "POST", body: { area: $("#area-pick").value } }),
     (r) => `Area saved. Score ${r.score}/100.`),
@@ -805,10 +824,10 @@ view.addEventListener("click", (e) => {
 
 // ================================================================ router
 const ROUTES = {
-  hr: { dashboard: pDashboard, add: pAdd, pool: pPool, vacancies: pVacancies, interns: pInterns, candidates: pCandidates, candidate: pCandidate, review: pReview, replies: pReplies, areas: pAreas, team: pTeam },
+  hr: { dashboard: pDashboard, add: pAdd, pool: pAdd, vacancies: pVacancies, interns: pInterns, candidates: pCandidates, candidate: pCandidate, review: pReview, replies: pReplies, areas: pAreas, team: pTeam },
   interviewer: { interviews: pInterviews, interview: pInterview, team: pTeam, candidate: pCandidate },
 };
-const AUTO = new Set(["dashboard", "pool", "vacancies", "interns", "candidates", "candidate", "review", "replies", "team", "interviews", "interview"]);
+const AUTO = new Set(["dashboard", "add", "pool", "vacancies", "interns", "candidates", "candidate", "review", "replies", "team", "interviews", "interview"]);
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, "");
   const i = h.indexOf("/");

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from . import checks, config, db, tools, vacancies
+from . import checks, config, db, letters, tools, vacancies
 
 
 class ActionError(Exception):
@@ -115,8 +115,9 @@ def choose_area(app_no: str, area_name: str) -> dict:
         raise ActionError(f'"{area_name}" is not an active area.')
     if not area.required_skills:
         raise ActionError(f"{area.name} has no required skills yet. Add them on the Areas page first.")
-    profile = c.profile or tools.rule_profile(c.cv_text, tools.skill_vocabulary(db.active_areas()))
-    score, parts, gaps = tools.score_cv(profile, c.cv_text, area)
+    areas = db.active_areas()
+    profile = c.profile or tools.rule_profile(c.cv_text, tools.skill_vocabulary(areas))
+    score, parts, gaps = tools.score_cv(profile, c.cv_text, area, tools.shared_terms(areas))
     status = tools.shortlist_status(score)
     flags = _resolve_flags(c, ("AI suggested a new area", "The Recruiter could not choose", "The scoring rules suggest",
                                "None of the usual", "The area "))
@@ -196,7 +197,7 @@ def invite_from_pool(app_no: str, area_name: str) -> dict:
     if area is None or not area.active:
         raise ActionError(f'"{area_name}" is not an active area.')
     profile = _profile(c)
-    score, parts, gaps = tools.score_cv(profile, c.cv_text, area)
+    score, parts, gaps = tools.score_cv(profile, c.cv_text, area, tools.shared_terms(db.active_areas()))
     if score is None:
         raise ActionError(f"{area.name} has no required skills yet. Add them on the Areas page first.")
     same = area.name == c.area
@@ -252,6 +253,32 @@ def rescore_pool() -> dict:
             db.log_event(c.id, "HR officer", "The areas changed, so the CV was sent back to the Recruiter.")
             requeued += 1
     return {"rescored": rescored, "requeued": requeued}
+
+
+SCORING_VERSION = "2"
+
+
+def upgrade_scoring() -> dict:
+    """Runs once on a register made before areas had their own related studies.
+    The starter areas get their studies and tidied keywords from shared/areas.json, and every
+    CV waiting in the pool is scored again, so the vacancy suggestions clean up by themselves."""
+    if db.get_setting("scoring_version") == SCORING_VERSION:
+        return {"rescored": 0}
+    db.update_starter_areas()
+    areas = db.active_areas()
+    rescored = 0
+    for c in db.candidates_in(config.POOL_STATUSES):
+        scores = tools.score_all_areas(_profile(c), c.cv_text, areas)
+        fields = dict(area_scores=scores)
+        if c.area in scores:
+            fields.update(score=scores[c.area]["score"], score_parts=scores[c.area]["parts"], gaps=scores[c.area]["gaps"])
+        if db.update_candidate(c.id, expect_status=c.status, **fields):
+            rescored += 1
+    db.set_setting("scoring_version", SCORING_VERSION)
+    if rescored:
+        db.log_event(None, "Recruiter", f"Scored {rescored} CV(s) in the pool again with the related studies of each area.")
+    vacancies.suggest_for_open()
+    return {"rescored": rescored}
 
 
 # ---- Vacancies (HR officer) ----------------------------------------------------------
@@ -386,6 +413,18 @@ def edit_draft(draft_id: int, subject: str, body: str) -> list[str]:
 
 
 def release_draft(draft_id: int) -> str:
+    """Saves the email to the outbox as a real email file (.eml) and moves the candidate on.
+    The acceptance email carries the placement letter PDF. Nothing is sent by the system."""
+    with db.Session() as s:
+        d = s.get(db.Draft, draft_id)
+        kind, cid = (d.kind, d.candidate_id) if d is not None else ("", 0)
+    if kind == "acceptance":
+        c = db.get_candidate(cid)
+        if c is not None and c.status == RELEASE_MOVES["acceptance"][0]:
+            letters.make(cid)                      # the latest details, made just before release
+            c = db.get_candidate(cid)
+        if c is not None and not letters.dates_ready(c):
+            raise ActionError("Add the start and end dates for the placement letter on the candidate page before releasing.")
     with db.Session() as s:
         d = s.get(db.Draft, draft_id)
         if d is None or d.status != "waiting":
@@ -396,9 +435,9 @@ def release_draft(draft_id: int) -> str:
         before, after, outcome = RELEASE_MOVES[d.kind]
         if c.status != before:
             raise ActionError(f"{c.app_no} is \"{config.STATUSES[c.status][0]}\", so this email cannot be released now.")
-        fname = re.sub(r"[^A-Za-z0-9_-]", "", f"{c.app_no}_{d.kind}_{d.id}") + ".txt"
-        (db.paths.outbox / fname).write_text(
-            f"To: {c.name} <{c.email}>\nSubject: {d.subject}\nReleased: {db.now()}\n\n{d.body}\n", encoding="utf-8")
+        fname = re.sub(r"[^A-Za-z0-9_-]", "", f"{c.app_no}_{d.kind}_{d.id}") + ".eml"
+        (db.paths.outbox / fname).write_bytes(
+            letters.email_file(c, d.subject, d.body, attach=(d.kind == "acceptance")))
         d.status, d.released_at, d.file = "released", db.now(), fname
         c.status = after
         if outcome:
@@ -406,7 +445,8 @@ def release_draft(draft_id: int) -> str:
         c.updated_at = db.now()
         s.commit()
         cid, label = c.id, KIND_LABELS[d.kind]
-    db.log_event(cid, "HR officer", f"Released the {label}. It was saved to the outbox (not sent).")
+    extra = " with the placement letter attached" if label == KIND_LABELS["acceptance"] else ""
+    db.log_event(cid, "HR officer", f"Released the {label}{extra}. It was saved to the outbox (not sent).")
     if after == "closed":
         vacancies.on_result(cid)
     return after
@@ -424,8 +464,33 @@ def _list(value, sep: str = r"[,\n]") -> list[str]:
     return out[:30]
 
 
+LETTER_EDIT_STATUSES = ("passed", "offer_ready")
+
+
+def save_letter_dates(app_no: str, start_date: str, end_date: str) -> dict:
+    """The HR officer changes the start and end dates; the placement letter is made again.
+    An empty date goes back to the automatic one (the Monday after the interview, six months)."""
+    c = db.get_candidate(app_no)
+    if c is None:
+        raise ActionError("Candidate not found.")
+    if not c.work_id or c.status not in LETTER_EDIT_STATUSES:
+        raise ActionError("The placement letter can only be changed before the acceptance email is released.")
+    try:
+        start, end = letters.check_dates(start_date, end_date)
+    except letters.LetterError as e:
+        raise ActionError(str(e)) from e
+    letter = dict(c.letter or {})
+    letter.update(start_date=start, end_date=end)
+    if not db.update_candidate(c.id, expect_status=set(LETTER_EDIT_STATUSES), letter=letter):
+        raise ActionError("This candidate changed in the meantime. Reload the page.")
+    letters.make(c.id)
+    db.log_event(c.id, "HR officer", "Saved the placement letter dates: "
+                 f"{letters.long_date(start)} to {letters.long_date(end)}. The letter was made again.")
+    return db.get_candidate(c.id).letter
+
+
 def save_area(area_id: int | None, name: str, description: str, required, preferred, keywords, checklist,
-              active: bool = True) -> int:
+              active: bool = True, studies=None) -> int:
     name = checks.clean_area_name(name)
     if not name:
         raise ActionError("Give the area a name.")
@@ -448,6 +513,8 @@ def save_area(area_id: int | None, name: str, description: str, required, prefer
         a.name, a.description = name, (description or "").strip()[:300]
         a.required_skills, a.preferred_skills = required, _list(preferred)
         a.keywords, a.checklist = _list(keywords), _list(checklist, r"\n")
+        if studies is not None:
+            a.studies = _list(studies)
         a.active = bool(active)
         s.commit()
         new_id = a.id

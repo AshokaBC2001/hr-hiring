@@ -45,6 +45,7 @@ def main() -> int:
     if a.command == "check":
         return check()
     db.setup()
+    actions.upgrade_scoring()
     if a.command == "samples":
         for r in actions.add_samples():
             print(("Added " + r["app_no"]) if r["ok"] else "Skipped", "-", r["file"], "" if r["ok"] else f"({r['reason']})")

@@ -57,6 +57,7 @@ class Candidate(Base):
     result_at: Mapped[str] = mapped_column(String(40), default="")
     work_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     checklist: Mapped[list] = mapped_column(JSON, default=list)
+    letter: Mapped[dict] = mapped_column(JSON, default=dict)        # placement letter: start/end date, file
     flags: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[str] = mapped_column(String(40), default="")
     updated_at: Mapped[str] = mapped_column(String(40), default="")
@@ -106,6 +107,7 @@ class Area(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     required_skills: Mapped[list] = mapped_column(JSON, default=list)
     preferred_skills: Mapped[list] = mapped_column(JSON, default=list)
+    studies: Mapped[list] = mapped_column(JSON, default=list)         # related subjects, for education points
     keywords: Mapped[list] = mapped_column(JSON, default=list)
     checklist: Mapped[list] = mapped_column(JSON, default=list)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -167,6 +169,8 @@ class Paths:
     @property
     def outbox(self) -> Path: return self.data / "outbox"
     @property
+    def letters(self) -> Path: return self.data / "letters"
+    @property
     def run_logs(self) -> Path: return self.data / "run-logs"
     @property
     def notes(self) -> Path: return self.data / "notes"
@@ -189,7 +193,7 @@ def setup(data_dir: Path | None = None) -> None:
     global _engine
     if data_dir is not None:
         paths.data = Path(data_dir)
-    for d in (paths.data, paths.inbox, paths.outbox, paths.run_logs, paths.notes):
+    for d in (paths.data, paths.inbox, paths.outbox, paths.letters, paths.run_logs, paths.notes):
         d.mkdir(parents=True, exist_ok=True)
     _engine = create_engine(f"sqlite:///{paths.db}", connect_args={"check_same_thread": False, "timeout": 30})
     Session.configure(bind=_engine)
@@ -200,7 +204,7 @@ def setup(data_dir: Path | None = None) -> None:
             for a in json.loads(config.AREAS_FILE.read_text(encoding="utf-8")):
                 s.add(Area(name=a["name"], description=a.get("description", ""),
                            required_skills=a.get("required_skills", []),
-                           preferred_skills=a.get("preferred_skills", []),
+                           preferred_skills=a.get("preferred_skills", []), studies=a.get("studies", []),
                            keywords=a.get("keywords", []), checklist=a.get("checklist", []),
                            active=True, added_by="Starter list"))
         if s.get(Setting, "next_work_id") is None:
@@ -220,6 +224,28 @@ def _add_missing_columns() -> None:
             conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN area_scores JSON DEFAULT '{}'")
         if "vacancy_id" not in have:
             conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN vacancy_id INTEGER")
+        if "letter" not in have:
+            conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN letter JSON DEFAULT '{}'")
+        have = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(areas)")}
+        if "studies" not in have:
+            conn.exec_driver_sql("ALTER TABLE areas ADD COLUMN studies JSON DEFAULT '[]'")
+
+
+def update_starter_areas() -> int:
+    """Copies the related studies and the keywords from shared/areas.json into the starter
+    areas of an older register. Areas the HR officer added are not touched. Returns how many changed."""
+    starter = {a["name"]: a for a in json.loads(config.AREAS_FILE.read_text(encoding="utf-8"))}
+    changed = 0
+    with Session() as s:
+        for a in s.scalars(select(Area).where(Area.added_by == "Starter list")):
+            src = starter.get(a.name)
+            if src is None:
+                continue
+            a.studies = src.get("studies", [])
+            a.keywords = src.get("keywords", [])
+            changed += 1
+        s.commit()
+    return changed
 
 
 # ---- small helpers ----------------------------------------------------------------

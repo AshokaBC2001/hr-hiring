@@ -12,6 +12,7 @@ Editing these files changes how the employee works, without touching the code.
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +28,9 @@ EMPLOYEES = {
     "planner": "Planner",
 }
 
+_file_lock = threading.Lock()
+_file_cache: dict[tuple[str, str], tuple[int, str]] = {}
+
 
 def folder(key: str) -> Path:
     return config.EMPLOYEES_DIR / key
@@ -34,7 +38,19 @@ def folder(key: str) -> Path:
 
 def read(key: str, rel: str) -> str:
     p = folder(key) / rel
-    return p.read_text(encoding="utf-8") if p.exists() else ""
+    try:
+        mtime = p.stat().st_mtime_ns
+    except OSError:
+        return ""
+    cache_key = (str(config.EMPLOYEES_DIR), f"{key}/{rel}")
+    with _file_lock:
+        hit = _file_cache.get(cache_key)
+        if hit is not None and hit[0] == mtime:
+            return hit[1]
+    text = p.read_text(encoding="utf-8")
+    with _file_lock:
+        _file_cache[cache_key] = (mtime, text)
+    return text
 
 
 def section(text: str, heading: str) -> str:
@@ -70,7 +86,7 @@ def routines(key: str) -> list[dict]:
     names = sorted([p.name for p in base.iterdir() if (p / "SKILL.md").exists()],
                    key=lambda n: order.index(n) if n in order else 99)
     for name in names:
-        text = (base / name / "SKILL.md").read_text(encoding="utf-8")
+        text = read(key, f"routines/{name}/SKILL.md")
         starts = re.search(r"^Starts when:\s*(.+)$", text, flags=re.M)
         done = re.search(r"^Done by:\s*(.+)$", text, flags=re.M)
         out.append({"name": name, "starts_when": starts.group(1).strip() if starts else "",

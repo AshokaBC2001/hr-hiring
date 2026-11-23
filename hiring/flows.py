@@ -44,11 +44,14 @@ def _doing(key: str, text: str) -> None:
     TEAM[key].update(state="working" if text else "idle", doing=text)
 
 
-def _cv_block(text: str) -> str:
-    return "CV TEXT:\n<<<\n" + text[:config.MAX_CV_CHARS] + "\n>>>"
+def _cv_block(text: str, max_chars: int | None = None) -> str:
+    limit = config.MAX_CV_CHARS if max_chars is None else max_chars
+    return "CV TEXT:\n<<<\n" + text[:limit] + "\n>>>"
 
 
-def _json(label: str, obj: Any) -> str:
+def _json(label: str, obj: Any, compact: bool = False) -> str:
+    if compact:
+        return f"{label} (JSON):\n" + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
     return f"{label} (JSON):\n" + json.dumps(obj, ensure_ascii=False, indent=1)
 
 
@@ -122,7 +125,7 @@ def r_parse_cv(s: RecruiterState) -> RecruiterState:
         return clean, problems
 
     res = ask_checked("recruiter", "parse-cv", _cv_block(cv_text), check,
-                      lambda: tools.rule_profile(cv_text, vocab))
+                      lambda: tools.rule_profile(cv_text, vocab), max_tokens=700)
     profile = dict(res.value or {})
     rules = tools.rule_profile(cv_text, vocab)
     for k in ("email", "phone", "name"):          # fill gaps the model left empty
@@ -171,8 +174,13 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
     areas = db.active_areas()
     names = [a.name for a in areas]
     cv_text = s["cv_text"]
-    area_list = [{"name": a.name, "description": a.description, "required_skills": a.required_skills} for a in areas]
-    task = (_json("AREAS", area_list) + "\n\n" + _json("PROFILE", s["profile"]) + "\n\n" + _cv_block(cv_text))
+    area_list = [
+        {"name": a.name, "description": (a.description or "")[:80], "required_skills": a.required_skills}
+        for a in areas
+    ]
+    task = (_json("AREAS", area_list, compact=True) + "\n\n"
+            + _json("PROFILE", s["profile"], compact=True) + "\n\n"
+            + _cv_block(cv_text, max_chars=4000))
     best_name, best_score, best_share = tools.best_area_by_rules(s["profile"], cv_text, areas)
 
     def fallback():
@@ -182,7 +190,7 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
         return {"area": config.NEEDS_REVIEW_AREA, "new_area": "", "reasons": [], "evidence": []}
 
     res = ask_checked("recruiter", "choose-area", task,
-                      lambda d: checks.check_area(d, names, cv_text), fallback)
+                      lambda d: checks.check_area(d, names, cv_text), fallback, max_tokens=300)
     v = res.value
     flags = list(s["flags"])
     events = list(s["events"])
@@ -326,9 +334,9 @@ def _facts(c: dict, **extra) -> dict:
 def _draft(key: str, routine: str, kind: str, cid: int, facts: dict, must_include: list[str],
            must_not: list[str] | None = None) -> dict:
     started = time.time()
-    res = ask_checked(key, routine, _json("FACTS", facts),
+    res = ask_checked(key, routine, _json("FACTS", facts, compact=True),
                       lambda d: checks.check_draft(d, facts, must_include, must_not),
-                      lambda: tools.template_draft(kind, facts))
+                      lambda: tools.template_draft(kind, facts), max_tokens=450)
     _record(key, routine, cid, started, res)
     written_by = {"ok": "AI", "fixed": "AI (fixed after a check)", "fallback": "Template (AI draft failed the checks)"}[res.how]
     notes = [] if res.how != "fallback" else res.problems[:3]
@@ -362,9 +370,9 @@ def c_prepare_questions(s: CoordinatorState) -> CoordinatorState:
     c = s["c"]
     task = _json("FACTS", {"area": c["area"], "skill_gaps": c["gaps"],
                            "projects": (c["profile"].get("projects") or [])[:5],
-                           "skills": (c["profile"].get("skills") or [])[:15]})
+                           "skills": (c["profile"].get("skills") or [])[:15]}, compact=True)
     res = ask_checked("coordinator", "prepare-questions", task, checks.check_questions,
-                      lambda: tools.template_questions(c["area"], c["gaps"], c["profile"]))
+                      lambda: tools.template_questions(c["area"], c["gaps"], c["profile"]), max_tokens=450)
     _record("coordinator", "prepare-questions", s["cid"], started, res)
     return {"questions": res.value, "questions_source": "Standard questions" if res.how == "fallback" else "AI",
             "events": s["events"] + [f"Prepared {len(res.value)} interview questions ({HOW_TEXT[res.how]})."]}
@@ -670,8 +678,8 @@ def k_morning_brief(s: ChiefState) -> ChiefState:
     started = time.time()
     _doing("chief-of-staff", "Writing the morning brief")
     facts = s["facts"]
-    res = ask_checked("chief-of-staff", "morning-brief", _json("FACTS", facts),
-                      lambda d: checks.check_brief(d, facts), lambda: _template_brief(facts))
+    res = ask_checked("chief-of-staff", "morning-brief", _json("FACTS", facts, compact=True),
+                      lambda d: checks.check_brief(d, facts), lambda: _template_brief(facts), max_tokens=400)
     _record("chief-of-staff", "morning-brief", None, started, res)
     by = {"ok": "AI", "fixed": "AI (fixed after a check)", "fallback": "Template (AI brief failed the checks)"}[res.how]
     with db.Session() as ses:
@@ -835,6 +843,39 @@ def run_chief(wait: bool = True) -> dict:
 def run_all_once(limit: int = 20) -> list[dict]:
     """Recruiter, then Coordinator, then Onboarding, each on everything waiting."""
     return [run_employee(k, limit=limit, wait=True) for k in ("recruiter", "coordinator", "onboarding")]
+
+
+_kick_lock = threading.Lock()
+_kick_running = False
+_kick_pending = False
+
+
+def kick_background() -> None:
+    """Coalesce UI-triggered agent runs so rapid clicks neither spawn thread storms nor drop work."""
+    global _kick_running, _kick_pending
+    with _kick_lock:
+        if _kick_running:
+            _kick_pending = True
+            return
+        _kick_running = True
+
+    def _worker() -> None:
+        global _kick_running, _kick_pending
+        try:
+            while True:
+                with _kick_lock:
+                    _kick_pending = False
+                run_all_once()
+                vacancies.suggest_for_open()
+                with _kick_lock:
+                    if not _kick_pending:
+                        _kick_running = False
+                        return
+        except Exception:
+            with _kick_lock:
+                _kick_running = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def start_background(fn, *args) -> None:

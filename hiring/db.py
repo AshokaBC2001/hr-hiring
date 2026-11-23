@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (JSON, Boolean, Float, ForeignKey, Integer, String, Text,
-                        create_engine, func, select)
+                        create_engine, event, func, select, update as sa_update)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from . import config
@@ -28,7 +28,7 @@ class Candidate(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     app_no: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200), default="")
-    email: Mapped[str] = mapped_column(String(200), default="")
+    email: Mapped[str] = mapped_column(String(200), index=True, default="")
     email_source: Mapped[str] = mapped_column(String(60), default="")
     cv_filename: Mapped[str] = mapped_column(String(255), default="")
     cv_stored: Mapped[str] = mapped_column(String(255), default="")
@@ -70,10 +70,16 @@ class Draft(Base):
     kind: Mapped[str] = mapped_column(String(30))
     subject: Mapped[str] = mapped_column(String(300), default="")
     body: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(20), default="waiting")  # waiting / released / discarded
+    status: Mapped[str] = mapped_column(String(20), index=True, default="waiting")  # waiting / released / discarded
     written_by: Mapped[str] = mapped_column(String(60), default="")
     check_notes: Mapped[list] = mapped_column(JSON, default=list)
     file: Mapped[str] = mapped_column(String(255), default="")
+    delivery_status: Mapped[str] = mapped_column(String(24), default="not_sent")  # not_sent / eml_only / outlook_draft / sent / failed
+    delivery_error: Mapped[str] = mapped_column(Text, default="")
+    sent_to: Mapped[str] = mapped_column(String(200), default="")
+    sent_at: Mapped[str] = mapped_column(String(40), default="")
+    outlook_message_id: Mapped[str] = mapped_column(String(255), default="")
+    outlook_web_link: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[str] = mapped_column(String(40), default="")
     released_at: Mapped[str] = mapped_column(String(40), default="")
 
@@ -82,7 +88,7 @@ class Event(Base):
     __tablename__ = "events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     candidate_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
-    at: Mapped[str] = mapped_column(String(40))
+    at: Mapped[str] = mapped_column(String(40), index=True)
     actor: Mapped[str] = mapped_column(String(40))
     text: Mapped[str] = mapped_column(Text)
 
@@ -93,7 +99,7 @@ class Run(Base):
     employee: Mapped[str] = mapped_column(String(30), index=True)
     routine: Mapped[str] = mapped_column(String(60))
     candidate_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    started_at: Mapped[str] = mapped_column(String(40))
+    started_at: Mapped[str] = mapped_column(String(40), index=True)
     seconds: Mapped[float] = mapped_column(Float, default=0.0)
     outcome: Mapped[str] = mapped_column(String(20))   # ok / fixed / fallback / stopped / error
     model_calls: Mapped[int] = mapped_column(Integer, default=0)
@@ -188,14 +194,28 @@ def now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
 
+def _configure_sqlite(dbapi_conn, _connection_record) -> None:
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.execute("PRAGMA foreign_keys=ON")
+    cur.execute("PRAGMA busy_timeout=5000")
+    cur.execute("PRAGMA temp_store=MEMORY")
+    cur.execute("PRAGMA cache_size=-16000")
+    cur.close()
+
+
 def setup(data_dir: Path | None = None) -> None:
     """Create the data folders and database, and copy the starter areas in once."""
     global _engine
+    if _engine is not None:
+        _engine.dispose()
     if data_dir is not None:
         paths.data = Path(data_dir)
     for d in (paths.data, paths.inbox, paths.outbox, paths.letters, paths.run_logs, paths.notes):
         d.mkdir(parents=True, exist_ok=True)
     _engine = create_engine(f"sqlite:///{paths.db}", connect_args={"check_same_thread": False, "timeout": 30})
+    event.listen(_engine, "connect", _configure_sqlite)
     Session.configure(bind=_engine)
     Base.metadata.create_all(_engine)
     _add_missing_columns()
@@ -219,16 +239,31 @@ def setup(data_dir: Path | None = None) -> None:
 def _add_missing_columns() -> None:
     """Older registers were made before some columns existed. Add them, keeping all data."""
     with _engine.begin() as conn:
-        have = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(candidates)")}
-        if "area_scores" not in have:
-            conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN area_scores JSON DEFAULT '{}'")
-        if "vacancy_id" not in have:
-            conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN vacancy_id INTEGER")
-        if "letter" not in have:
-            conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN letter JSON DEFAULT '{}'")
-        have = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(areas)")}
-        if "studies" not in have:
-            conn.exec_driver_sql("ALTER TABLE areas ADD COLUMN studies JSON DEFAULT '[]'")
+        for table in (Candidate.__table__, Draft.__table__, Area.__table__):
+            existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table.name})")}
+            for col in table.columns:
+                if col.name in existing or col.primary_key:
+                    continue
+                col_type = col.type.compile(dialect=_engine.dialect)
+                default_sql = ""
+                if col.default is not None and col.default.is_scalar:
+                    arg = col.default.arg
+                    if isinstance(arg, str):
+                        default_sql = " DEFAULT '" + arg.replace("'", "''") + "'"
+                    elif isinstance(arg, (int, float)) and not isinstance(arg, bool):
+                        default_sql = f" DEFAULT {arg}"
+                elif col.name in ("area_scores", "letter"):
+                    default_sql = " DEFAULT '{}'"
+                elif col.name == "studies":
+                    default_sql = " DEFAULT '[]'"
+                conn.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}{default_sql}")
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS ix_candidates_email ON candidates (email)",
+            "CREATE INDEX IF NOT EXISTS ix_drafts_status ON drafts (status)",
+            "CREATE INDEX IF NOT EXISTS ix_events_at ON events (at)",
+            "CREATE INDEX IF NOT EXISTS ix_runs_started_at ON runs (started_at)",
+        ):
+            conn.exec_driver_sql(idx_sql)
 
 
 def update_starter_areas() -> int:
@@ -304,22 +339,30 @@ def get_candidate(app_no_or_id: str | int) -> Candidate | None:
         return s.scalar(select(Candidate).where(Candidate.app_no == app_no_or_id))
 
 
-def update_candidate(candidate_id: int, expect_status: str | set | None = None, **fields: Any) -> bool:
-    """Save fields on a candidate. If expect_status is given, only save when the
-    candidate is still in that status. Returns True when saved."""
+def get_candidates_by_app_nos(app_nos: list[str] | set[str]) -> dict[str, Candidate]:
+    """Batch-fetch candidates keyed by app_no to avoid N+1 SQLite round-trips."""
+    clean = [str(a).strip() for a in app_nos if a]
+    if not clean:
+        return {}
     with Session() as s:
-        c = s.get(Candidate, candidate_id)
-        if c is None:
+        rows = s.scalars(select(Candidate).where(Candidate.app_no.in_(clean)))
+        return {c.app_no: c for c in rows}
+
+
+def update_candidate(candidate_id: int, expect_status: str | set | None = None, **fields: Any) -> bool:
+    """Save fields on a candidate atomically. If expect_status is given, only save when the
+    candidate is still in that status inside SQLite. Returns True when saved."""
+    stmt = sa_update(Candidate).where(Candidate.id == candidate_id)
+    if expect_status is not None:
+        allowed = {expect_status} if isinstance(expect_status, str) else set(expect_status)
+        if not allowed:
             return False
-        if expect_status is not None:
-            allowed = {expect_status} if isinstance(expect_status, str) else set(expect_status)
-            if c.status not in allowed:
-                return False
-        for k, v in fields.items():
-            setattr(c, k, v)
-        c.updated_at = now()
+        stmt = stmt.where(Candidate.status.in_(allowed))
+    values = {**fields, "updated_at": now()}
+    with Session() as s:
+        res = s.execute(stmt.values(**values))
         s.commit()
-        return True
+        return (res.rowcount or 0) == 1
 
 
 def add_flag(candidate_id: int, text: str, by: str) -> None:

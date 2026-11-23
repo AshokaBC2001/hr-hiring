@@ -14,20 +14,21 @@ A local, AI-assisted hiring workflow. Four AI agents handle the routine work of 
 
 ## Features
 
-- Runs fully on your own machine. CVs never leave the computer.
-- Reads the intern records from Talent Hub (MongoDB) and never writes to them.
+- Runs locally on your machine with SQLite and llama.cpp (no local database server required).
+- Reads intern records from Talent Hub (example JSON or read-only MongoDB connection string) and never writes to them.
 - Opens a vacancy when interns are about to finish, and suggests the best waiting CVs for it.
-- Local LLM (Gemma 3 4B by default) served by llama.cpp. No cloud API keys needed.
-- Scores are calculated by code, not by the model.
+- Local LLM (Gemma 3 4B by default) served by llama.cpp with flash-attention and KV prompt-cache reuse.
+- Scores are calculated by code, not by the model (with pre-tokenized CV and stem-prefix caching).
 - Every model answer is checked against the CV before it is saved.
-- Emails are drafted only. Nothing is sent. Released emails are saved to `data/outbox/` as `.eml` files
-  (double-click one to open it in Mail or Outlook).
+- Flexible Microsoft Outlook email integration:
+  - Default **`.eml` mode**: released emails are saved to `data/outbox/` as Outlook-ready `.eml` drafts (`X-Unsent: 1`, with placement letter PDF attached) plus one-click **Outlook Web** compose links.
+  - **Microsoft Outlook Drafts / Direct Send** powered by Microsoft's official `msal` library (Device Code Flow) + Microsoft Graph Mail API v1.0, or optional **Office 365 SMTP**.
 - After a Pass, a placement letter (plain A4 PDF) is made by code and attached to the acceptance email.
 - Plain web UI with two roles: HR officer and interviewer.
 
 ## Tech stack
 
-Python, FastAPI, LangGraph, SQLAlchemy (SQLite), APScheduler, llama.cpp, pymongo (to read Talent Hub),
+Python, FastAPI, LangGraph, SQLAlchemy (SQLite in WAL mode), APScheduler, llama.cpp, `msal` + Microsoft Graph Mail API v1.0, pymongo (optional read-only Talent Hub lookup),
 fpdf2 (placement letter PDF), and plain HTML, CSS and JavaScript.
 
 ## Requirements
@@ -158,7 +159,7 @@ To reset all data, stop the app and delete the `data` folder.
 ```
 setup.sh, start_model.sh, start_app.sh   setup and start scripts
 app.py                                   web app entry point
-run.py                                   CLI helpers: check, samples, once, brief, status
+run.py                                   CLI helpers: check, samples, once, brief, status, outlook-*
 employees/                               the 5 AI agents (Markdown)
 shared/areas.json                        starter areas
 shared/example_interns.json              made-up intern records (until Talent Hub access is granted)
@@ -167,7 +168,7 @@ hiring/
   config.py     settings               db.py         database (SQLite)
   llm.py        llama-server client    checks.py     checks on model answers
   talenthub.py  reads Talent Hub       vacancies.py  vacancies and suggestions
-  letters.py    placement letter PDF and the .eml email files
+  letters.py    placement letter PDF   outlook.py    Microsoft Outlook (MSAL + Graph API / .eml / SMTP)
   tools.py      CV reading, scoring, scheduling, templates
   employees.py  loads agent folders, checked model calls
   flows.py      LangGraph workflows    scheduler.py  APScheduler jobs
@@ -228,6 +229,7 @@ To refresh the made-up intern records so the demo dates are near today:
 
 - The Markdown agent structure (ROLE, SCHEDULE, RELEASES and SKILL files) follows the idea from [markfulton/ai-employees](https://github.com/markfulton/ai-employees).
 - The placement letter feature follows the approach of [faizanfirdousi/appointment-letter-automation](https://github.com/faizanfirdousi/appointment-letter-automation) (MIT license): a letter template and an email template, with the letter PDF attached to the email.
+- Microsoft Outlook authentication and Graph Mail integration use Microsoft's official [AzureAD/microsoft-authentication-library-for-python](https://github.com/AzureAD/microsoft-authentication-library-for-python) (`msal`, MIT license) with the Microsoft Graph Mail API v1.0.
 - The PDF is made with [fpdf2](https://github.com/py-pdf/fpdf2) (LGPL-3.0), installed as a library.
 - The letter font is DejaVu Sans (Bitstream Vera license, see `shared/letter/fonts/LICENSE.txt`).
 - All people in `samples/` are fictional.

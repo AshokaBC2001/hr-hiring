@@ -130,7 +130,17 @@ function renderFrame() {
   el.className = "model" + (down ? " down" : "");
   el.title = down ? ((STATE.notice && STATE.notice.text) || m.detail || "") : m.model;
   const working = Object.values(STATE.team).find((x) => x.state === "working");
-  $("#foot").textContent = `${APP_NAME} - prototype. Emails are drafted only, never sent. AI team: ${STATE.paused ? "paused" : working ? working.name + " is working" : "waiting for work"}.`;
+  const ol = STATE.outlook || {};
+  const acct = ol.account?.username || "";
+  const olText = ol.mode === "graph_draft"
+    ? `Outlook: Graph Drafts (${acct || "sign in required"})`
+    : ol.mode === "graph_send"
+    ? `Outlook: Graph Send (${acct || "sign in required"})`
+    : ol.mode === "smtp"
+    ? `Outlook: Office 365 SMTP (${ol.smtp_user || ol.smtp_host})`
+    : "Outlook: Draft files (.eml) & Outlook Web";
+  const redir = ol.test_recipient ? ` -> demo: ${ol.test_recipient}` : "";
+  $("#foot").textContent = `${APP_NAME} - ${olText}${redir}. AI team: ${STATE.paused ? "paused" : working ? working.name + " is working" : "waiting for work"}.`;
 }
 async function refreshState() {
   try { STATE = await api("/api/state"); } catch { return; }
@@ -163,17 +173,42 @@ function modelNotice() {
 }
 function mailBlock(d, { showCandidate = false } = {}) {
   const editing = UI.editDraft === d.id;
+  const ol = STATE?.outlook || {};
   const state = d.status === "waiting" ? tag("Waiting for release", ROLE === "hr" ? "need" : "") : d.status === "released" ? tag("Released") : tag(d.status);
+  const deliveryBadge = d.delivery_status === "sent" ? tag("Sent via Outlook", "pass")
+    : d.delivery_status === "outlook_draft" || (d.status === "waiting" && d.outlook_web_link) ? tag("Outlook Draft", "pass")
+    : d.delivery_status === "failed" ? tag("Outlook Failed", "fail")
+    : "";
   const notes = (d.check_notes || []).map((n) => `<div class="warn">Warning: ${esc(n)}</div>`).join("");
+  const emlBtn = `<a class="btn small" href="${esc(d.eml_url || `/api/drafts/${d.id}/eml`)}" title="Download .eml draft (with PDF attachment if acceptance) for Outlook Desktop">.eml</a>`;
+  const webBtn = d.compose_links?.outlook_office
+    ? `<a class="btn small" href="${esc(d.compose_links.outlook_office)}" target="_blank" rel="noopener" title="Open pre-filled draft in Microsoft 365 Outlook Web">Outlook Web</a>`
+    : "";
+  const openBtn = d.outlook_web_link
+    ? `<a class="btn small" href="${esc(d.outlook_web_link)}" target="_blank" rel="noopener">Open in Outlook</a>`
+    : "";
+  const graphDraftBtn = ROLE === "hr" && d.email && ol.signed_in
+    ? `<button class="btn small" data-act="outlook-draft" data-id="${d.id}">${d.outlook_web_link ? "Update Outlook Draft" : "Save to Outlook Drafts"}</button>`
+    : "";
   let foot = "";
   if (d.status === "waiting" && ROLE === "hr") {
     foot = editing
       ? `<div class="actions"><button class="btn primary" data-act="save-draft" data-id="${d.id}">Save changes</button><button class="btn" data-act="cancel-edit">Cancel</button></div>`
       : `<div class="actions"><button class="btn primary" data-act="release" data-id="${d.id}" data-name="${esc(d.name)}" data-kind="${esc(d.kind_label)}" ${d.can_release ? "" : "disabled"}>Release</button>
-         <button class="btn" data-act="edit-draft" data-id="${d.id}">Edit</button>
+         <button class="btn" data-act="edit-draft" data-id="${d.id}">Edit</button>${graphDraftBtn}${openBtn}${webBtn}${emlBtn}
          ${d.can_release ? "" : `<span class="small muted">${esc(d.release_blocker || "The candidate is not at this step now.")}</span>`}</div>`;
   } else if (d.status === "released") {
-    foot = `<span class="small muted">Released ${esc(fmtTime(d.released_at))}. Saved to data/outbox/${esc(d.file)} (not sent). Double-click the file to open it in Mail.</span>`;
+    const info = d.delivery_status === "sent"
+      ? `Sent ${esc(fmtTime(d.sent_at || d.released_at))} via Outlook to ${esc(d.sent_to || d.email)}. Archived at data/outbox/${esc(d.file)}.`
+      : d.delivery_status === "outlook_draft"
+      ? `Saved to Outlook Drafts ${esc(fmtTime(d.sent_at || d.released_at))} for ${esc(d.sent_to || d.email)}. Archived at data/outbox/${esc(d.file)}.`
+      : d.delivery_status === "failed"
+      ? `Saved to data/outbox/${esc(d.file)}, but Outlook failed: ${esc(d.delivery_error || "delivery error")}`
+      : `Released ${esc(fmtTime(d.released_at))}. Saved to data/outbox/${esc(d.file)} (double-click to open in Outlook).`;
+    const retryBtn = ROLE === "hr" && d.email && ol.mode && ol.mode !== "eml"
+      ? `<button class="btn small" data-act="resend-draft" data-id="${d.id}">${d.delivery_status === "sent" ? "Resend Outlook" : "Retry Outlook"}</button>`
+      : "";
+    foot = `<div class="actions"><span class="small muted" style="flex:1">${info}</span>${retryBtn}${graphDraftBtn}${openBtn}${webBtn}${emlBtn}</div>`;
   }
   const attach = d.attachment ? `<div class="mail-attach small">Attachment: <a href="/api/candidates/${encodeURIComponent(d.app_no)}/letter" target="_blank" rel="noopener">${esc(d.attachment)}</a> <span class="muted">(placement letter, made by code)</span></div>` : "";
   const body = editing
@@ -181,15 +216,174 @@ function mailBlock(d, { showCandidate = false } = {}) {
        <div class="form-row"><label for="ed-body">Email</label><textarea id="ed-body" rows="12">${esc(d.body)}</textarea></div></div>`
     : `<div class="mail-body"><b>${esc(d.subject)}</b>\n\n${esc(d.body)}</div>`;
   return `<div class="mail" id="mail-${d.id}">
-    <div class="mail-head"><b>${esc(d.kind_label)}</b>${state}${byText(d.written_by)}<span class="grow"></span>
+    <div class="mail-head"><b>${esc(d.kind_label)}</b>${state}${deliveryBadge}${byText(d.written_by)}<span class="grow"></span>
       ${showCandidate ? candLink(d.app_no) : ""}<span class="small muted">To: ${esc(d.name || "")} ${d.email ? "&lt;" + esc(d.email) + "&gt;" : "(no email yet)"}</span></div>
     ${notes}${body}${attach}${foot ? `<div class="mail-foot">${foot}</div>` : ""}</div>`;
 }
 
+let _authTimer = null;
+function _stopAuthPoll() {
+  if (_authTimer) { clearInterval(_authTimer); _authTimer = null; }
+}
+
+async function openOutlookSettings() {
+  _stopAuthPoll();
+  openDialog(`<h3>Microsoft Outlook Settings</h3><p class="muted">Loading settings...</p>`);
+  const dlg = $("#dialog");
+  dlg.addEventListener("close", _stopAuthPoll, { once: true });
+  try {
+    const cfg = await api("/api/outlook/settings");
+    const renderBody = (c) => {
+      const acct = c.account;
+      const a = c.auth || {};
+      const showGraph = c.mode === "graph_draft" || c.mode === "graph_send";
+      const showSmtp = c.mode === "smtp";
+      const authBlock = acct
+        ? `<div class="notice ok" style="padding:8px 10px"><div class="grow small"><b>Signed in:</b> ${esc(acct.name)} (${esc(acct.username)})</div><button type="button" class="btn small" data-dlg="ol-signout">Sign out</button></div>`
+        : a.status === "pending" && a.user_code
+        ? `<div class="notice need" style="padding:8px 10px"><div class="grow small">Open <a href="${esc(a.verification_uri || "https://microsoft.com/devicelogin")}" target="_blank" rel="noopener"><b>${esc(a.verification_uri || "microsoft.com/devicelogin")}</b></a> and enter code:<br><span class="code-pill" style="margin-top:4px">${esc(a.user_code)}</span></div></div>`
+        : `<div class="actions"><button type="button" class="btn primary small" data-dlg="ol-signin">Sign in with Microsoft (Outlook)</button>${a.error ? `<span class="small" style="color:var(--fail)">${esc(a.error)}</span>` : ""}</div>`;
+
+      $("#dialog-body").innerHTML = `
+        <h3>Microsoft Outlook Settings</h3>
+        <p class="small muted" style="margin:0 0 12px">Choose how emails leave the system after you release them. Draft (.eml) files for Outlook Desktop are always archived too.</p>
+        <div class="form-row">
+          <label for="ol-mode">Delivery mode on release</label>
+          <select id="ol-mode">
+            <option value="eml" ${c.mode === "eml" ? "selected" : ""}>Outlook Draft files (.eml) &amp; Outlook Web links (no setup)</option>
+            <option value="graph_draft" ${c.mode === "graph_draft" ? "selected" : ""}>Save directly to Outlook Drafts (Microsoft Graph + MSAL)</option>
+            <option value="graph_send" ${c.mode === "graph_send" ? "selected" : ""}>Send directly from Outlook (Microsoft Graph + MSAL)</option>
+            <option value="smtp" ${c.mode === "smtp" ? "selected" : ""}>Office 365 / Outlook SMTP (smtp.office365.com)</option>
+          </select>
+        </div>
+        <div id="ol-graph-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${showGraph || acct ? "" : ""}">
+          <div class="label" style="margin-bottom:6px">Microsoft 365 / Outlook Graph (MSAL OAuth2)</div>
+          <div class="grid two">
+            <div class="form-row" style="margin:0"><label for="ol-client">Application (Client) ID</label><input type="text" id="ol-client" value="${esc(c.client_id)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
+            <div class="form-row" style="margin:0"><label for="ol-tenant">Tenant ID</label><input type="text" id="ol-tenant" value="${esc(c.tenant_id || "common")}" placeholder="common"></div>
+          </div>
+          <div class="help" style="margin:4px 0 8px">Keep <code>common</code> for both Microsoft 365 work/university accounts and Outlook.com.</div>
+          <div id="ol-auth-box">${authBlock}</div>
+          <details class="small muted" style="margin-top:8px">
+            <summary style="cursor:pointer">How to get a free Azure Application (Client) ID (2 minutes)</summary>
+            <ol class="clean" style="margin-top:4px">
+              <li>Open <b>entra.microsoft.com</b> (or <b>portal.azure.com</b>) &rarr; App registrations &rarr; New registration.</li>
+              <li>Supported account types: select <b>Multitenant + personal Microsoft accounts</b>.</li>
+              <li>Authentication &rarr; toggle <b>Allow public client flows</b> to <b>Yes</b>.</li>
+              <li>API permissions &rarr; Add Microsoft Graph Delegated: <code>Mail.ReadWrite</code>, <code>Mail.Send</code>, <code>User.Read</code>.</li>
+            </ol>
+          </details>
+        </div>
+        <div id="ol-smtp-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${showSmtp ? "" : "display:none"}">
+          <div class="label" style="margin-bottom:6px">Office 365 / Outlook SMTP</div>
+          <div class="grid two">
+            <div class="form-row" style="margin:0"><label for="ol-shost">SMTP Host</label><input type="text" id="ol-shost" value="${esc(c.smtp_host)}" placeholder="smtp.office365.com"></div>
+            <div class="form-row" style="margin:0"><label for="ol-sport">SMTP Port</label><input type="text" id="ol-sport" value="${esc(c.smtp_port)}" placeholder="587"></div>
+            <div class="form-row" style="margin:0"><label for="ol-suser">Outlook Email</label><input type="email" id="ol-suser" value="${esc(c.smtp_user)}" placeholder="you@company.com"></div>
+            <div class="form-row" style="margin:0"><label for="ol-spass">Password / App Password</label><input type="password" id="ol-spass" placeholder="${c.has_smtp_password ? "Saved (type to change)" : "Outlook password"}"></div>
+          </div>
+        </div>
+        <div class="form-row" style="margin-top:12px">
+          <label for="ol-test-to">Safe Demo Recipient Override (optional)</label>
+          <input type="email" id="ol-test-to" value="${esc(c.test_recipient)}" placeholder="Leave blank to use candidate email">
+          <div class="help">If set, released emails go to this inbox (for supervisor demos) instead of real candidates.</div>
+        </div>
+        <div class="form-row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft)">
+          <label for="ol-probe">Test Outlook connection</label>
+          <div class="actions">
+            <input type="email" id="ol-probe" style="flex:1" value="${esc(c.test_recipient || acct?.username || c.smtp_user)}" placeholder="supervisor@outlook.com">
+            <button type="button" class="btn" data-dlg="ol-test">Test Outlook</button>
+          </div>
+        </div>
+        <div class="actions"><button type="button" class="btn" data-dlg="cancel">Cancel</button><button type="button" class="btn primary" data-dlg="save">Save settings</button></div>`;
+
+      const collect = () => {
+        const p = {
+          mode: $("#ol-mode").value,
+          client_id: $("#ol-client").value.trim(),
+          tenant_id: $("#ol-tenant").value.trim() || "common",
+          test_recipient: $("#ol-test-to").value.trim(),
+          smtp_host: $("#ol-shost").value.trim(),
+          smtp_port: $("#ol-sport").value.trim(),
+          smtp_user: $("#ol-suser").value.trim(),
+          smtp_use_tls: true,
+        };
+        if ($("#ol-spass").value) p.smtp_password = $("#ol-spass").value;
+        return p;
+      };
+
+      $("#ol-mode").onchange = (e) => {
+        $("#ol-smtp-sec").style.display = e.target.value === "smtp" ? "" : "none";
+      };
+
+      const bodyEl = $("#dialog-body");
+      bodyEl.querySelector('[data-dlg="cancel"]').onclick = () => { _stopAuthPoll(); closeDialog(); };
+      bodyEl.querySelector('[data-dlg="save"]').onclick = async () => {
+        try {
+          await api("/api/outlook/settings", { method: "POST", body: collect() });
+          _stopAuthPoll(); closeDialog(); toast("Saved Outlook settings."); lastHTML = ""; await refreshState(); render();
+        } catch (e) { toast(e.message, true); }
+      };
+      bodyEl.querySelector('[data-dlg="ol-test"]').onclick = async () => {
+        try {
+          await api("/api/outlook/settings", { method: "POST", body: collect() });
+          const r = await api("/api/outlook/test", { method: "POST", body: { to: $("#ol-probe").value } });
+          toast(r.delivery_status === "outlook_draft" ? `Test draft saved in Outlook for ${r.sent_to}.` : `Test email sent via Outlook to ${r.sent_to}.`);
+        } catch (e) { toast(e.message, true); }
+      };
+
+      const signInBtn = bodyEl.querySelector('[data-dlg="ol-signin"]');
+      if (signInBtn) signInBtn.onclick = async () => {
+        try {
+          const payload = collect();
+          if (!payload.client_id) { toast("Enter your Application (Client) ID first.", true); return; }
+          await api("/api/outlook/settings", { method: "POST", body: payload });
+          const st = await api("/api/outlook/auth/start", { method: "POST" });
+          const latest = await api("/api/outlook/settings");
+          renderBody({ ...latest, auth: st });
+          _stopAuthPoll();
+          _authTimer = setInterval(async () => {
+            try {
+              const cur = await api("/api/outlook/auth/status");
+              if (cur.signed_in) {
+                _stopAuthPoll();
+                toast(`Signed in to Outlook as ${cur.account?.username || "Microsoft account"}.`);
+                renderBody(await api("/api/outlook/settings"));
+                refreshState();
+              } else if (cur.status === "error") {
+                _stopAuthPoll();
+                renderBody({ ...(await api("/api/outlook/settings")), auth: cur });
+              }
+            } catch { /* ignore transient poll failure */ }
+          }, 3000);
+        } catch (e) { toast(e.message, true); }
+      };
+
+      const signOutBtn = bodyEl.querySelector('[data-dlg="ol-signout"]');
+      if (signOutBtn) signOutBtn.onclick = async () => {
+        try {
+          _stopAuthPoll();
+          const latest = await api("/api/outlook/auth/signout", { method: "POST" });
+          toast("Signed out of Microsoft Outlook.");
+          renderBody(latest);
+          refreshState();
+        } catch (e) { toast(e.message, true); }
+      };
+    };
+    renderBody(cfg);
+  } catch (e) {
+    $("#dialog-body").innerHTML = `<h3>Outlook settings</h3><p class="muted">${esc(e.message)}</p><div class="actions"><button class="btn" data-dlg="cancel">Close</button></div>`;
+    $("#dialog-body").querySelector('[data-dlg="cancel"]').onclick = closeDialog;
+  }
+}
+
 // ================================================================ HR officer pages
-async function pDashboard() {
+async function pDashboard(_arg, { reuseState = false } = {}) {
   title("Dashboard");
-  const [s, all] = await Promise.all([api("/api/state"), api("/api/candidates")]);
+  const [s, all] = await Promise.all([
+    reuseState && STATE ? Promise.resolve(STATE) : api("/api/state"),
+    api("/api/candidates"),
+  ]);
   STATE = s;
   renderFrame();
   const t = s.tiles;
@@ -513,7 +707,7 @@ async function pCandidate(appNo) {
         ${c.result_comment ? `<div class="field"><div class="label">Interviewer's comment</div><div>${esc(c.result_comment)}</div></div>` : ""}</div>
         <div><div class="label">Questions for the interviewer</div>${c.questions.length ? `<ol class="clean">${c.questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>` : `<span class="muted">-</span>`}</div></div></div>` : ""}
     ${c.letter ? letterBox(c) : ""}
-    ${c.drafts.length ? `<div class="box" id="emails">${boxHead("Emails", `<span class="small muted">Nothing is sent without your release</span>`)}${c.drafts.slice().reverse().map((d) => mailBlock(d)).join("")}</div>` : ""}
+    ${c.drafts.length ? `<div class="box" id="emails">${boxHead("Emails", `<button class="btn small" data-act="outlook-settings">Outlook settings</button>`)}${c.drafts.slice().reverse().map((d) => mailBlock(d)).join("")}</div>` : ""}
     ${c.work_id ? `<div class="box">${boxHead("Onboarding")}
       <div class="grid two"><div><div class="label">Work ID</div><div class="big">${esc(c.work_id)}</div><div class="small muted">Issued by plain code after the Pass. Never reused.</div></div>
       <div><div class="label">Onboarding checklist</div>${c.checklist.length ? `<ul class="clean">${c.checklist.map((i) => `<li>${esc(i.item)}</li>`).join("")}</ul>` : `<span class="muted">Being prepared</span>`}</div></div></div>` : ""}
@@ -578,9 +772,17 @@ async function pReplies(arg) {
   title("Replies");
   if (arg === "released" || arg === "waiting") UI.repliesTab = arg;
   const drafts = await api(`/api/drafts?state=${UI.repliesTab}`);
-  setView(`<div class="box">${boxHead("Emails drafted by the AI team")}
+  const ol = STATE?.outlook || {};
+  const modeHint = ol.mode === "graph_draft"
+    ? `Microsoft Graph Drafts mode (${ol.account?.username || "sign in via Outlook settings"}). Released emails save straight into your Outlook Drafts folder and data/outbox/.`
+    : ol.mode === "graph_send"
+    ? `Microsoft Graph Direct Send (${ol.account?.username || "sign in via Outlook settings"}). Released emails send directly via Outlook and archive to data/outbox/.`
+    : ol.mode === "smtp"
+    ? `Office 365 SMTP mode (${ol.smtp_user || ol.smtp_host}). Released emails send live and archive to data/outbox/.`
+    : `Draft files (.eml) & Outlook Web mode. Click Release to save an Outlook-ready .eml (with PDF attached) in data/outbox/, or use Outlook Web / configure Microsoft Graph.`;
+  setView(`<div class="box">${boxHead("Emails drafted by the AI team", `<button class="btn small" data-act="outlook-settings">Outlook settings</button>`)}
     <div class="filters"><div class="tabs"><button class="${UI.repliesTab === "waiting" ? "on" : ""}" data-act="tab" data-t="waiting">Waiting for release</button><button class="${UI.repliesTab === "released" ? "on" : ""}" data-act="tab" data-t="released">Released</button></div></div>
-    <p class="small muted" style="margin-top:0">Read each email, edit it if needed, then release it. In this prototype a released email is saved in the data/outbox folder. Nothing is sent.</p>
+    <p class="small muted" style="margin-top:0">${esc(modeHint)}</p>
     ${drafts.length ? drafts.map((d) => mailBlock(d, { showCandidate: true })).join("") : empty(UI.repliesTab === "waiting" ? "No emails are waiting for release." : "No emails released yet.")}</div>`);
 }
 
@@ -757,6 +959,17 @@ const ACTS = {
     act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/archive`, { method: "POST" }), "Archived.");
   },
   "restore": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/restore`, { method: "POST" }), "Restored. The Recruiter reads it again."),
+  "outlook-settings": () => openOutlookSettings(),
+  "outlook-draft": (b) => act(async () => {
+    const r = await api(`/api/drafts/${b.dataset.id}/outlook-draft`, { method: "POST" });
+    if (!r.ok) throw new Error(r.error || "Could not create Outlook draft.");
+    return r;
+  }, (r) => `Saved draft in Outlook for ${r.sent_to || "candidate"}.`),
+  "resend-draft": (b) => act(async () => {
+    const r = await api(`/api/drafts/${b.dataset.id}/resend`, { method: "POST" });
+    if (!r.ok) throw new Error(r.error || "Outlook delivery failed.");
+    return r;
+  }, (r) => r.delivery_status === "outlook_draft" ? `Saved Outlook draft for ${r.sent_to}.` : `Sent via Outlook to ${r.sent_to}.`),
   "toggle-cv": () => { UI.showCv = !UI.showCv; lastHTML = ""; render(); },
   "toggle-runs": () => { UI.showRuns = !UI.showRuns; lastHTML = ""; render(); },
   "edit-email": () => { UI.editEmail = true; lastHTML = ""; render().then(() => $("#email-input")?.focus()); },
@@ -793,8 +1006,20 @@ const ACTS = {
     lastHTML = ""; render();
   },
   "release": async (b) => {
-    if (!(await confirmBox({ heading: `Release the ${b.dataset.kind}?`, text: `To ${b.dataset.name}. In this prototype the email is saved to the outbox folder, not sent.`, ok: "Release" }))) return;
-    act(() => api(`/api/drafts/${b.dataset.id}/release`, { method: "POST" }), "Released.");
+    const ol = STATE?.outlook || {};
+    const info = ol.mode === "graph_draft"
+      ? `Email will be archived to data/outbox/ AND saved directly into your Outlook Drafts folder.`
+      : ol.mode === "graph_send"
+      ? (ol.test_recipient ? `Email will be archived and sent via Outlook to demo override (${ol.test_recipient}).` : `Email will be archived and sent directly from your Outlook account to ${b.dataset.name}.`)
+      : ol.mode === "smtp"
+      ? `Email will be archived and sent via Office 365 SMTP.`
+      : `The .eml draft (with PDF attached if acceptance) is saved to data/outbox/ for Outlook Desktop.`;
+    if (!(await confirmBox({ heading: `Release the ${b.dataset.kind}?`, text: `To ${b.dataset.name}. ${info}`, ok: "Release" }))) return;
+    act(() => api(`/api/drafts/${b.dataset.id}/release`, { method: "POST" }),
+      (r) => r.delivery_status === "sent" ? `Released and sent via Outlook to ${r.sent_to}.`
+        : r.delivery_status === "outlook_draft" ? `Released and saved to Outlook Drafts (${r.sent_to}).`
+        : r.delivery_status === "failed" ? `Released to outbox (Outlook failed: ${r.delivery_error}).`
+        : "Released.");
   },
   "jump": (b, e) => { e.preventDefault(); $("#emails")?.scrollIntoView({ behavior: "smooth" }); },
   "area-new": (b) => areaForm(null, b.dataset.name || ""),
@@ -849,13 +1074,20 @@ async function render() {
 window.addEventListener("hashchange", render);
 
 async function tick() {
+  if (document.hidden) return;
   await refreshState();
   if (!rendering && AUTO.has(current.page) && !busy()) {
-    try { await ROUTES[ROLE][current.page]?.(current.arg); } catch { /* keep the page as it is */ }
+    try { await ROUTES[ROLE][current.page]?.(current.arg, { reuseState: true }); } catch { /* keep the page as it is */ }
   }
+}
+function scheduleTick() {
+  const working = STATE && Object.values(STATE.team || {}).some((x) => x.state === "working");
+  const hasNew = STATE && (STATE.tiles?.new || 0) > 0;
+  const delay = working || hasNew ? 5000 : 10000;
+  setTimeout(async () => { await tick(); scheduleTick(); }, delay);
 }
 (async function start() {
   await refreshState();
   await render();
-  setInterval(tick, 5000);
+  scheduleTick();
 })();

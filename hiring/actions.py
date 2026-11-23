@@ -11,7 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from . import checks, config, db, letters, tools, vacancies
+from . import checks, config, db, letters, outlook, tools, vacancies
 
 
 class ActionError(Exception):
@@ -413,8 +413,8 @@ def edit_draft(draft_id: int, subject: str, body: str) -> list[str]:
 
 
 def release_draft(draft_id: int) -> str:
-    """Saves the email to the outbox as a real email file (.eml) and moves the candidate on.
-    The acceptance email carries the placement letter PDF. Nothing is sent by the system."""
+    """Saves the email to the outbox (.eml with Placement Letter PDF when acceptance), dispatches
+    via the configured Microsoft Outlook mode (if enabled), and moves the candidate on."""
     with db.Session() as s:
         d = s.get(db.Draft, draft_id)
         kind, cid = (d.kind, d.candidate_id) if d is not None else ("", 0)
@@ -436,9 +436,20 @@ def release_draft(draft_id: int) -> str:
         if c.status != before:
             raise ActionError(f"{c.app_no} is \"{config.STATUSES[c.status][0]}\", so this email cannot be released now.")
         fname = re.sub(r"[^A-Za-z0-9_-]", "", f"{c.app_no}_{d.kind}_{d.id}") + ".eml"
+        attach = (letters.file_name(c), letters.read(c)) if d.kind == "acceptance" else None
         (db.paths.outbox / fname).write_bytes(
-            letters.email_file(c, d.subject, d.body, attach=(d.kind == "acceptance")))
+            letters.email_file(c, d.subject, d.body, attach=(d.kind == "acceptance"))
+        )
+        res = outlook.deliver_draft(c.email, c.name or "", d.subject, d.body, attachment=attach)
         d.status, d.released_at, d.file = "released", db.now(), fname
+        d.delivery_status = res["delivery_status"]
+        d.delivery_error = res.get("error", "")
+        d.sent_to = res.get("sent_to", "")
+        d.sent_at = db.now() if res["ok"] and res["delivery_status"] in ("sent", "outlook_draft") else ""
+        if res.get("message_id"):
+            d.outlook_message_id = res["message_id"]
+        if res.get("web_link"):
+            d.outlook_web_link = res["web_link"]
         c.status = after
         if outcome:
             c.outcome = outcome + (f" (work ID {c.work_id})" if d.kind == "acceptance" and c.work_id else "")
@@ -446,10 +457,109 @@ def release_draft(draft_id: int) -> str:
         s.commit()
         cid, label = c.id, KIND_LABELS[d.kind]
     extra = " with the placement letter attached" if label == KIND_LABELS["acceptance"] else ""
-    db.log_event(cid, "HR officer", f"Released the {label}{extra}. It was saved to the outbox (not sent).")
+    delivery_status = res["delivery_status"]
+    if delivery_status == "sent":
+        note = f"Released the {label}{extra}. Sent via Outlook to {res['sent_to']} and saved to the outbox."
+    elif delivery_status == "outlook_draft":
+        note = f"Released the {label}{extra}. Saved as an Outlook Draft for {res['sent_to']} and saved to the outbox."
+    elif delivery_status == "failed":
+        note = f"Released the {label}{extra} to the outbox (Outlook delivery failed: {res.get('error', '')[:160]})."
+    else:
+        note = f"Released the {label}{extra}. It was saved to the outbox (not sent)."
+    db.log_event(cid, "HR officer", note)
     if after == "closed":
         vacancies.on_result(cid)
     return after
+
+
+def export_draft_eml(draft_id: int) -> tuple[str, bytes]:
+    """Build a ready-to-open RFC 5322 .eml file (X-Unsent: 1 + Placement Letter PDF if acceptance)."""
+    with db.Session() as s:
+        d = s.get(db.Draft, draft_id)
+        if d is None:
+            raise ActionError("Draft not found.")
+        c = s.get(db.Candidate, d.candidate_id)
+        if c is None:
+            raise ActionError("Candidate not found.")
+    if not c.email or not checks.EMAIL_RE.fullmatch(c.email):
+        raise ActionError("Add the candidate's email address on the candidate page before downloading .eml.")
+    fname = d.file or (re.sub(r"[^A-Za-z0-9_-]", "", f"{c.app_no}_{d.kind}_{d.id}") + ".eml")
+    attach = d.kind == "acceptance" and bool(c.work_id)
+    if attach and d.file == "":
+        letters.read(c)
+    raw = letters.email_file(c, d.subject, d.body, attach=attach)
+    return fname, raw
+
+
+def push_draft_to_outlook(draft_id: int) -> dict:
+    """Create an Outlook Draft in the user's mailbox via Microsoft Graph (including PDF if acceptance)."""
+    with db.Session() as s:
+        d = s.get(db.Draft, draft_id)
+        if d is None:
+            raise ActionError("Draft not found.")
+        c = s.get(db.Candidate, d.candidate_id)
+        if c is None:
+            raise ActionError("Candidate not found.")
+        subject, body, kind, d_status = d.subject, d.body, d.kind, d.status
+        cid = c.id
+    if not c.email or not checks.EMAIL_RE.fullmatch(c.email):
+        raise ActionError("Add the candidate's valid email address before saving a draft to Outlook.")
+    attach = (letters.file_name(c), letters.read(c)) if (kind == "acceptance" and c.work_id) else None
+    res = outlook.create_outlook_draft(c.email, c.name or "", subject, body, attachment=attach)
+    with db.Session() as s:
+        d = s.get(db.Draft, draft_id)
+        if d is not None:
+            if res["ok"]:
+                d.outlook_message_id = res.get("message_id", "")
+                d.outlook_web_link = res.get("web_link", "")
+                d.sent_to = res.get("sent_to", "")
+                d.delivery_error = ""
+                if d.status == "released" and d.delivery_status != "sent":
+                    d.delivery_status = "outlook_draft"
+                    d.sent_at = db.now()
+            elif d.status == "released":
+                d.delivery_error = res.get("error", "")
+            s.commit()
+    if res["ok"]:
+        db.log_event(cid, "HR officer", f"Saved {KIND_LABELS.get(kind, kind)} draft in Outlook for {res['sent_to']}.")
+    elif d_status == "released":
+        db.log_event(cid, "HR officer", f"Could not save draft in Outlook: {res.get('error', '')[:160]}")
+    return res
+
+
+def resend_draft(draft_id: int) -> dict:
+    """Send or re-send a released email via active Microsoft Outlook Graph or SMTP settings."""
+    with db.Session() as s:
+        d = s.get(db.Draft, draft_id)
+        if d is None or d.status != "released":
+            raise ActionError("Only released emails can be sent or retried.")
+        c = s.get(db.Candidate, d.candidate_id)
+        if c is None or not c.email or not checks.EMAIL_RE.fullmatch(c.email):
+            raise ActionError("Add the candidate's valid email address before sending.")
+        subject, body, kind, cid = d.subject, d.body, d.kind, c.id
+    cfg = outlook.raw_settings()
+    if cfg["mode"] == "eml":
+        raise ActionError("Outlook mode is set to '.eml file only'. Choose Graph Send, Graph Drafts, or Office 365 SMTP in Outlook settings first.")
+    attach = (letters.file_name(c), letters.read(c)) if (kind == "acceptance" and c.work_id) else None
+    res = outlook.deliver_draft(c.email, c.name or "", subject, body, attachment=attach, cfg=cfg)
+    with db.Session() as s:
+        d = s.get(db.Draft, draft_id)
+        if d is not None:
+            d.delivery_status = res["delivery_status"]
+            d.delivery_error = res.get("error", "")
+            d.sent_to = res.get("sent_to", "")
+            if res["ok"]:
+                d.sent_at = db.now()
+                if res.get("message_id"):
+                    d.outlook_message_id = res["message_id"]
+                if res.get("web_link"):
+                    d.outlook_web_link = res["web_link"]
+            s.commit()
+    if res["ok"]:
+        db.log_event(cid, "HR officer", f"Delivered {KIND_LABELS.get(kind, kind)} via Outlook ({res['delivery_status']}) to {res['sent_to']}.")
+    else:
+        db.log_event(cid, "HR officer", f"Outlook delivery failed: {res.get('error', '')[:160]}")
+    return res
 
 
 # ---- Areas (HR officer) --------------------------------------------------------------------

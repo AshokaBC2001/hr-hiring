@@ -8,6 +8,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+
+def _load_dotenv(path: Path) -> None:
+    """Load simple KEY=VALUE lines from .env without overriding process environment variables."""
+    if not path.is_file():
+        return
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            key = k.strip()
+            val = v.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, val)
+    except OSError:
+        pass
+
+
+_load_dotenv(ROOT / ".env")
+
 # Where the system keeps its data (register database, CV files, released replies, logs).
 DATA_DIR = Path(os.environ.get("HR_DATA_DIR", str(ROOT / "data")))
 
@@ -19,11 +40,12 @@ SAMPLES_DIR = ROOT / "samples"
 # ---- The model (llama.cpp llama-server, OpenAI-style API) -------------------
 MODEL_URL = os.environ.get("HR_MODEL_URL", "http://127.0.0.1:8080").rstrip("/")
 MODEL_NAME = os.environ.get("HR_MODEL_NAME", "gemma-3-4b-it")
+MODEL_API_KEY = os.environ.get("HR_MODEL_API_KEY", "").strip()
 MODEL_TIMEOUT = float(os.environ.get("HR_MODEL_TIMEOUT", "300"))   # seconds per call
 MODEL_TEMPERATURE = 0.2
 MODEL_MAX_TOKENS = 900
 # Gemma models have no separate "system" role, so instructions go into the user message.
-MERGE_SYSTEM_INTO_USER = True
+MERGE_SYSTEM_INTO_USER = os.environ.get("HR_MERGE_SYSTEM", "1").strip().lower() not in ("0", "false", "no")
 
 # ---- The web app ---------------------------------------------------------------
 APP_HOST = "127.0.0.1"   # only this computer can open the pages
@@ -125,3 +147,19 @@ RELEASE_STATUSES = {"invite_ready", "hold_note_ready", "reply_ready", "offer_rea
 POOL_STATUSES = {"in_pool", "no_area"}
 # Statuses that are shown in the CV pool (Add CV page) and not on the Candidates page.
 NOT_IN_HIRING = POOL_STATUSES | {"archived"}
+
+# ---- Microsoft Outlook email integration ------------------------------------------
+# Delivery modes: "eml" (outbox .eml + Outlook Web links), "graph_draft" (Outlook Drafts via Microsoft Graph),
+# "graph_send" (direct send via Microsoft Graph), or "smtp" (Office 365 SMTP AUTH).
+_RAW_OUTLOOK_MODE = os.environ.get("HR_OUTLOOK_MODE", "eml").strip().lower()
+OUTLOOK_MODE = _RAW_OUTLOOK_MODE if _RAW_OUTLOOK_MODE in ("eml", "graph_draft", "graph_send", "smtp") else "eml"
+OUTLOOK_CLIENT_ID = os.environ.get("HR_OUTLOOK_CLIENT_ID", "").strip()
+OUTLOOK_TENANT_ID = os.environ.get("HR_OUTLOOK_TENANT_ID", "common").strip() or "common"
+OUTLOOK_FROM_NAME = os.environ.get("HR_OUTLOOK_FROM_NAME", "HR Hiring Team").strip()
+OUTLOOK_TEST_RECIPIENT = os.environ.get("HR_OUTLOOK_TEST_RECIPIENT", "").strip()
+OUTLOOK_SMTP_HOST = os.environ.get("HR_OUTLOOK_SMTP_HOST", "smtp.office365.com").strip()
+OUTLOOK_SMTP_PORT = int(os.environ.get("HR_OUTLOOK_SMTP_PORT", "587"))
+OUTLOOK_SMTP_USER = os.environ.get("HR_OUTLOOK_SMTP_USER", "").strip()
+OUTLOOK_SMTP_PASSWORD = os.environ.get("HR_OUTLOOK_SMTP_PASSWORD", "")
+OUTLOOK_SMTP_USE_TLS = os.environ.get("HR_OUTLOOK_SMTP_USE_TLS", "1").strip().lower() not in ("0", "false", "no")
+OUTLOOK_TIMEOUT = float(os.environ.get("HR_OUTLOOK_TIMEOUT", "20"))

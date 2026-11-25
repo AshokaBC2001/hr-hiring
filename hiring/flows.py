@@ -44,11 +44,14 @@ def _doing(key: str, text: str) -> None:
     TEAM[key].update(state="working" if text else "idle", doing=text)
 
 
-def _cv_block(text: str) -> str:
-    return "CV TEXT:\n<<<\n" + text[:config.MAX_CV_CHARS] + "\n>>>"
+def _cv_block(text: str, max_chars: int | None = None) -> str:
+    limit = config.MAX_CV_CHARS if max_chars is None else max_chars
+    return "CV TEXT:\n<<<\n" + text[:limit] + "\n>>>"
 
 
-def _json(label: str, obj: Any) -> str:
+def _json(label: str, obj: Any, compact: bool = False) -> str:
+    if compact:
+        return f"{label} (JSON):\n" + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
     return f"{label} (JSON):\n" + json.dumps(obj, ensure_ascii=False, indent=1)
 
 
@@ -122,7 +125,7 @@ def r_parse_cv(s: RecruiterState) -> RecruiterState:
         return clean, problems
 
     res = ask_checked("recruiter", "parse-cv", _cv_block(cv_text), check,
-                      lambda: tools.rule_profile(cv_text, vocab))
+                      lambda: tools.rule_profile(cv_text, vocab), max_tokens=700)
     profile = dict(res.value or {})
     rules = tools.rule_profile(cv_text, vocab)
     for k in ("email", "phone", "name"):          # fill gaps the model left empty
@@ -171,9 +174,23 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
     areas = db.active_areas()
     names = [a.name for a in areas]
     cv_text = s["cv_text"]
-    area_list = [{"name": a.name, "description": a.description, "required_skills": a.required_skills} for a in areas]
-    task = (_json("AREAS", area_list) + "\n\n" + _json("PROFILE", s["profile"]) + "\n\n" + _cv_block(cv_text))
-    best_name, best_score, best_share = tools.best_area_by_rules(s["profile"], cv_text, areas)
+    area_list = [
+        {"name": a.name, "description": (a.description or "")[:80], "required_skills": a.required_skills}
+        for a in areas
+    ]
+    task = (_json("AREAS", area_list, compact=True) + "\n\n"
+            + _json("PROFILE", s["profile"], compact=True) + "\n\n"
+            + _cv_block(cv_text, max_chars=4000))
+    # Compute all area scores once and reuse across choose_area / score_match / no_area.
+    scores = tools.score_all_areas(s["profile"], cv_text, areas)
+    cv = checks.CVText(cv_text)
+    area_by_name = {a.name: a for a in areas}
+    best_name, best_score, best_share = "", -1, 0.0
+    for name, info in scores.items():
+        req = area_by_name[name].required_skills or []
+        share = (sum(1 for sk in req if cv.has(sk)) / len(req)) if req else 0.0
+        if info["score"] > best_score:
+            best_name, best_score, best_share = name, info["score"], share
 
     def fallback():
         if best_name and best_share >= 0.5:
@@ -182,7 +199,7 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
         return {"area": config.NEEDS_REVIEW_AREA, "new_area": "", "reasons": [], "evidence": []}
 
     res = ask_checked("recruiter", "choose-area", task,
-                      lambda d: checks.check_area(d, names, cv_text), fallback)
+                      lambda d: checks.check_area(d, names, cv_text), fallback, max_tokens=300)
     v = res.value
     flags = list(s["flags"])
     events = list(s["events"])
@@ -197,7 +214,6 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
         events.append(f"Chose the area {area} ({'chosen by rules' if v.get('by_rules') else 'suggested by AI'}; {HOW_TEXT[res.how]}).")
         # Second opinion from the scoring rules
         chosen = next(a for a in areas if a.name == area)
-        cv = checks.CVText(cv_text)
         req = chosen.required_skills or []
         share = (sum(1 for x in req if cv.has(x)) / len(req)) if req else 0
         if req and share == 0:
@@ -206,7 +222,8 @@ def r_choose_area(s: RecruiterState) -> RecruiterState:
             flags.append(f"The scoring rules suggest {best_name} instead of {area}. Check the area.")
     _record("recruiter", "choose-area", s["cid"], started, res)
     return {"area": area, "area_source": source if area else "", "reasons": v.get("reasons", []),
-            "evidence": v.get("evidence", []), "new_area": v.get("new_area", ""), "flags": flags, "events": events}
+            "evidence": v.get("evidence", []), "new_area": v.get("new_area", ""),
+            "area_scores": scores, "flags": flags, "events": events}
 
 
 def r_route_area(s: RecruiterState) -> str:
@@ -217,7 +234,7 @@ def r_no_area(s: RecruiterState) -> RecruiterState:
     """No area fits: the CV waits in the pool with the label "No matching area".
     It is read again automatically when the HR officer adds or changes an area."""
     started = time.time()
-    scores = tools.score_all_areas(s["profile"], s["cv_text"], db.active_areas())
+    scores = s.get("area_scores") or tools.score_all_areas(s["profile"], s["cv_text"], db.active_areas())
     _record("recruiter", "add-to-pool", s["cid"], started, note="No matching area")
     return {"status": "no_area", "area_scores": scores,
             "events": s["events"] + ["Added to the pool as \"No matching area\"."]}
@@ -225,7 +242,7 @@ def r_no_area(s: RecruiterState) -> RecruiterState:
 
 def r_score_match(s: RecruiterState) -> RecruiterState:
     started = time.time()
-    scores = tools.score_all_areas(s["profile"], s["cv_text"], db.active_areas())
+    scores = s.get("area_scores") or tools.score_all_areas(s["profile"], s["cv_text"], db.active_areas())
     _record("recruiter", "score-match", s["cid"], started, note=f"Scored for {len(scores)} area(s)")
     best = scores.get(s["area"])
     if best is None:
@@ -256,7 +273,7 @@ def r_add_to_pool(s: RecruiterState) -> RecruiterState:
 def r_save(s: RecruiterState) -> RecruiterState:
     fields: dict[str, Any] = {"status": s["status"]}
     if "profile" in s:
-        fields.update(university=tools.find_university(s["profile"].get("education") or []))
+        fields.update(university=tools.find_university(s["profile"].get("education") or [], s.get("cv_text", "")))
         fields.update(profile=s["profile"], profile_source=s.get("profile_source", ""),
                       name=s.get("name", ""), email=s.get("email", ""), email_source=s.get("email_source", ""),
                       area=s.get("area", ""), area_source=s.get("area_source", ""),
@@ -327,9 +344,9 @@ def _facts(c: dict, **extra) -> dict:
 def _draft(key: str, routine: str, kind: str, cid: int, facts: dict, must_include: list[str],
            must_not: list[str] | None = None) -> dict:
     started = time.time()
-    res = ask_checked(key, routine, _json("FACTS", facts),
+    res = ask_checked(key, routine, _json("FACTS", facts, compact=True),
                       lambda d: checks.check_draft(d, facts, must_include, must_not),
-                      lambda: tools.template_draft(kind, facts))
+                      lambda: tools.template_draft(kind, facts), max_tokens=450)
     _record(key, routine, cid, started, res)
     written_by = {"ok": "AI", "fixed": "AI (fixed after a check)", "fallback": "Template (AI draft failed the checks)"}[res.how]
     notes = [] if res.how != "fallback" else res.problems[:3]
@@ -363,9 +380,9 @@ def c_prepare_questions(s: CoordinatorState) -> CoordinatorState:
     c = s["c"]
     task = _json("FACTS", {"area": c["area"], "skill_gaps": c["gaps"],
                            "projects": (c["profile"].get("projects") or [])[:5],
-                           "skills": (c["profile"].get("skills") or [])[:15]})
+                           "skills": (c["profile"].get("skills") or [])[:15]}, compact=True)
     res = ask_checked("coordinator", "prepare-questions", task, checks.check_questions,
-                      lambda: tools.template_questions(c["area"], c["gaps"], c["profile"]))
+                      lambda: tools.template_questions(c["area"], c["gaps"], c["profile"]), max_tokens=450)
     _record("coordinator", "prepare-questions", s["cid"], started, res)
     return {"questions": res.value, "questions_source": "Standard questions" if res.how == "fallback" else "AI",
             "events": s["events"] + [f"Prepared {len(res.value)} interview questions ({HOW_TEXT[res.how]})."]}
@@ -671,8 +688,8 @@ def k_morning_brief(s: ChiefState) -> ChiefState:
     started = time.time()
     _doing("chief-of-staff", "Writing the morning brief")
     facts = s["facts"]
-    res = ask_checked("chief-of-staff", "morning-brief", _json("FACTS", facts),
-                      lambda d: checks.check_brief(d, facts), lambda: _template_brief(facts))
+    res = ask_checked("chief-of-staff", "morning-brief", _json("FACTS", facts, compact=True),
+                      lambda d: checks.check_brief(d, facts), lambda: _template_brief(facts), max_tokens=400)
     _record("chief-of-staff", "morning-brief", None, started, res)
     by = {"ok": "AI", "fixed": "AI (fixed after a check)", "fallback": "Template (AI brief failed the checks)"}[res.how]
     with db.Session() as ses:
@@ -836,6 +853,42 @@ def run_chief(wait: bool = True) -> dict:
 def run_all_once(limit: int = 20) -> list[dict]:
     """Recruiter, then Coordinator, then Onboarding, each on everything waiting."""
     return [run_employee(k, limit=limit, wait=True) for k in ("recruiter", "coordinator", "onboarding")]
+
+
+_kick_lock = threading.Lock()
+_kick_running = False
+_kick_pending = False
+
+
+def kick_background() -> None:
+    """Coalesce UI-triggered agent runs so rapid clicks neither spawn thread storms nor drop work."""
+    global _kick_running, _kick_pending
+    with _kick_lock:
+        if _kick_running:
+            _kick_pending = True
+            return
+        _kick_running = True
+
+    def _worker() -> None:
+        global _kick_running, _kick_pending
+        try:
+            while True:
+                with _kick_lock:
+                    _kick_pending = False
+                if config.MODE == "mail":
+                    run_employee("recruiter", limit=20, wait=True)
+                else:
+                    run_all_once()
+                    vacancies.suggest_for_open()
+                with _kick_lock:
+                    if not _kick_pending:
+                        _kick_running = False
+                        return
+        except Exception:
+            with _kick_lock:
+                _kick_running = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def start_background(fn, *args) -> None:

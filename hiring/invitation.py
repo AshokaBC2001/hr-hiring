@@ -19,9 +19,12 @@ import io
 import json
 import re
 from datetime import date, datetime, timedelta
+from email.utils import formataddr
 from pathlib import Path
 
-from . import checks, config, db, mailer
+from sqlalchemy.orm import defer
+
+from . import checks, config, db, mailer, outlook
 
 SHARED = config.ROOT / "shared" / "mail"
 DEFAULT_TEMPLATE = SHARED / "invitation.txt"
@@ -205,7 +208,7 @@ def to_html(body: str) -> str:
         out = []
         for para in re.split(r"\n\s*\n", text.strip()):
             safe = html_lib.escape(para)
-            safe = re.sub(r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', safe)
+            safe = re.sub(r"(https?://[^\s<]+?)([).,;:!?]*(?=\s|<|$))", r'<a href="\1">\1</a>\2', safe)
             out.append("<p>" + safe.replace("\n", "<br>") + "</p>")
         return "\n".join(out)
 
@@ -231,22 +234,74 @@ def send(app_no: str) -> dict:
     if "{visit_date}" in d["body"] or "{visit_date}" in d["subject"]:
         raise MailProblem("Pick the visit date first.")
     paths = [attachment_path(n) for n in d.get("attachments", [])]
+    to_hdr = formataddr((c.name, c.email)) if c.name else c.email
     try:
-        result = mailer.send_mail(f"{c.name} <{c.email}>" if c.name else c.email, d["subject"], to_html(d["body"]),
+        result = mailer.send_mail(to_hdr, d["subject"], to_html(d["body"]),
                                   d["body"], paths, sender=settings().get("sender", ""),
                                   name_hint=f"{c.app_no}_invitation_{datetime.now():%Y%m%d%H%M%S}")
     except mailer.MailError as e:
         raise MailProblem(str(e)) from e
-    sent = dict(d, status="sent", sent_at=db.now(), how=result.get("how", ""), file=result.get("file", ""))
+    how_code = result.get("how", "")
+    sent = dict(
+        d,
+        status="sent",
+        sent_at=db.now(),
+        how=how_code,
+        file=result.get("file", ""),
+        sender=result.get("sender", ""),
+        sent_to=result.get("sent_to", c.email),
+        message_id=result.get("message_id", ""),
+        web_link=result.get("web_link", ""),
+    )
     reg = dict(c.register or {})
     reg["mail_date"] = date.today().isoformat()
     if reg.get("status", "Not mailed") == "Not mailed":
         reg["status"] = "Mail sent"
     db.update_candidate(c.id, invite=sent, register=reg)
-    how = "saved to the outbox as " + sent["file"] if sent["how"] == "eml" else "sent with " + sent["how"]
-    db.log_event(c.id, "HR officer", f"Invitation mail {how} (visit {d.get('visit_date') or 'date in the text'}, "
+    if how_code == "eml":
+        how_text = "saved to the outbox as " + sent["file"]
+    elif how_code == "graph_draft":
+        how_text = f"saved to Outlook Drafts ({sent['sent_to']})"
+    elif how_code == "graph":
+        how_text = f"sent with Outlook Graph ({sent['sender'] or 'Microsoft account'} -> {sent['sent_to']})"
+    elif how_code == "smtp":
+        how_text = f"sent with Office 365 SMTP ({sent['sender'] or 'SMTP'} -> {sent['sent_to']})"
+    else:
+        how_text = "sent with " + how_code
+    db.log_event(c.id, "HR officer", f"Invitation mail {how_text} (visit {d.get('visit_date') or 'date in the text'}, "
                                      f"{len(paths)} attachment(s)).")
     return sent
+
+
+def send_test_invite(to_email: str) -> dict:
+    """Send a test invitation mail with all active attachments to verify live delivery."""
+    clean_to = re.sub(r"[\r\n]+", " ", (to_email or "").strip())
+    if not checks.EMAIL_RE.fullmatch(clean_to):
+        raise MailProblem("Enter a valid test email address.")
+    cfg = settings()
+    day = next_visit_day()
+    body = template().replace("{visit_date}", visit_text(day))
+    subject = f"{cfg['subject']} [TEST]"
+    att_rows = attachments()
+    paths = [attachment_path(a["name"]) for a in att_rows]
+    try:
+        res = mailer.send_mail(
+            f"Test Recipient <{clean_to}>",
+            subject,
+            to_html(body),
+            body,
+            paths,
+            sender=cfg.get("sender", ""),
+            name_hint=f"test_invitation_{datetime.now():%Y%m%d%H%M%S}",
+        )
+    except mailer.MailError as exc:
+        raise MailProblem(str(exc)) from exc
+    return {
+        "ok": True,
+        **res,
+        "attachments": [p.name for p in paths],
+        "total_bytes": sum(p.stat().st_size for p in paths),
+    }
 
 
 # ---- the register -----------------------------------------------------------------------------
@@ -283,10 +338,14 @@ def save_row(app_no: str, fields: dict) -> dict:
     if "name" in f and not f["name"]:
         raise MailProblem("The name cannot be empty.")
     if f.get("ref_no"):
+        want = f["ref_no"].lower()
         with db.Session() as s:
-            for other in s.scalars(db.select(db.Candidate).where(db.Candidate.id != c.id)):
-                if (other.register or {}).get("ref_no", "").strip().lower() == f["ref_no"].lower():
-                    raise MailProblem(f"{f['ref_no']} is already used for {other.name or other.app_no}.")
+            for other_app, other_name, other_reg in s.execute(
+                db.select(db.Candidate.app_no, db.Candidate.name, db.Candidate.register)
+                .where(db.Candidate.id != c.id)
+            ):
+                if (other_reg or {}).get("ref_no", "").strip().lower() == want:
+                    raise MailProblem(f"{f['ref_no']} is already used for {other_name or other_app}.")
     reg = dict(c.register or {})
     for k in ("ref_no", "technology", "nic", "address", "vehicle", "tel", "laptop", "status"):
         if k in f:
@@ -305,19 +364,34 @@ def save_row(app_no: str, fields: dict) -> dict:
     return row(db.get_candidate(c.id))
 
 
-def rows(show: str = "all", q: str = "") -> list[dict]:
+def register_data(show: str = "all", q: str = "") -> tuple[list[dict], dict[str, int]]:
+    """Fetch register rows and filter counts in one deferred-column SQLite query."""
     with db.Session() as s:
-        every = list(s.scalars(db.select(db.Candidate).where(db.Candidate.status != "archived")
-                               .order_by(db.Candidate.id.desc())))
-    out = [row(c) for c in every]
+        every = list(
+            s.scalars(
+                db.select(db.Candidate)
+                .options(defer(db.Candidate.cv_text), defer(db.Candidate.profile), defer(db.Candidate.area_scores))
+                .where(db.Candidate.status != "archived")
+                .order_by(db.Candidate.id.desc())
+            )
+        )
+    all_rows = [row(c) for c in every]
+    sent_count = sum(1 for r in all_rows if r["mail_date"])
+    counts = {"all": len(all_rows), "sent": sent_count, "not_sent": len(all_rows) - sent_count}
     if show == "sent":
-        out = [r for r in out if r["mail_date"]]
+        out = [r for r in all_rows if r["mail_date"]]
     elif show == "not_sent":
-        out = [r for r in out if not r["mail_date"]]
+        out = [r for r in all_rows if not r["mail_date"]]
+    else:
+        out = all_rows
     q = (q or "").strip().lower()
     if q:
         out = [r for r in out if q in " ".join(str(r[k]) for k, _ in REGISTER_COLUMNS + [("app_no", ""), ("email", "")]).lower()]
-    return out
+    return out, counts
+
+
+def rows(show: str = "all", q: str = "") -> list[dict]:
+    return register_data(show, q)[0]
 
 
 def export_xlsx(data: list[dict]) -> bytes:
@@ -341,7 +415,12 @@ def export_xlsx(data: list[dict]) -> bytes:
         for key, _ in REGISTER_COLUMNS:
             v = r.get(key, "")
             if key == "mail_date" and v:
-                v = date.fromisoformat(v)
+                try:
+                    v = date.fromisoformat(str(v))
+                except ValueError:
+                    v = str(v)
+            elif isinstance(v, str) and v.startswith("="):
+                v = "'" + v
             values.append(v)
         ws.append(values)
         for cell in ws[ws.max_row]:

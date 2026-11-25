@@ -217,3 +217,179 @@ def test_full_mode_is_unchanged(mail, monkeypatch):
     read_all()
     d = mail.get(f"/api/candidates/{no}").json()
     assert mail.get("/api/state").json()["mode"] == "full" and d["invite"] is None and d["register"] is None
+
+
+# ---- Outlook Graph multi-step sending, >3 MB upload session & SMTP fallback -------------------
+def test_graph_send_with_all_four_required_attachments(mail):
+    from hiring import outlook
+
+    outlook.save_settings({"mode": "graph", "client_id": "11111111-2222-3333-4444-555555555555"})
+
+    class _FakeApp:
+        def get_accounts(self):
+            return [{"username": "hr.sender@slt.com.lk", "name": "HR Sender"}]
+
+        def acquire_token_silent(self, scopes, account=None):
+            return {"access_token": "graph-token-123"}
+
+    requests_seen: list[tuple[str, str, dict]] = []
+
+    def fake_graph(method, url, payload, token, cfg):
+        requests_seen.append((method, url, payload))
+        if url.endswith("/me/messages"):
+            return {"id": "draft-all-4", "webLink": "https://outlook.office.com/mail/id/draft-all-4"}
+        return {}
+
+    outlook.set_msal_factory(lambda cid, auth, cache: _FakeApp())
+    outlook.set_graph_backend(fake_graph)
+
+    no = add("arjun_mehta.txt", "Mr.Dinesh")
+    read_all()
+    sent = invitation.send(no)
+    assert sent["how"] == "graph"
+    assert sent["sender"] == "hr.sender@slt.com.lk"
+    assert sent["file"].endswith(".eml") and (db.paths.outbox / sent["file"]).is_file()
+
+    # Exact sequence: 1 create draft + 4 separate attachments + 1 send
+    assert requests_seen[0][0] == "POST" and requests_seen[0][1].endswith("/me/messages")
+    att_calls = [c for c in requests_seen if "/me/messages/draft-all-4/attachments" in c[1]]
+    assert len(att_calls) == 4
+    assert sorted(c[2]["name"] for c in att_calls) == sorted(REQUIRED)
+    assert requests_seen[-1][1].endswith("/me/messages/draft-all-4/send")
+
+
+def test_graph_large_attachment_uses_upload_session_in_320kib_chunks(mail):
+    from hiring import outlook
+
+    outlook.save_settings({"mode": "graph", "client_id": "11111111-2222-3333-4444-555555555555"})
+
+    class _FakeApp:
+        def get_accounts(self):
+            return [{"username": "hr.sender@slt.com.lk", "name": "HR Sender"}]
+
+        def acquire_token_silent(self, scopes, account=None):
+            return {"access_token": "graph-token-big"}
+
+    large_size = 3_600_000
+    large_bytes = b"%PDF-1.4\n" + (b"X" * (large_size - 9))
+    assert invitation.add_attachment("large_manual.pdf", large_bytes)["ok"] is True
+
+    requests_seen: list[tuple[str, str, dict]] = []
+    uploaded_chunks = bytearray()
+
+    def fake_graph(method, url, payload, token, cfg):
+        requests_seen.append((method, url, payload))
+        if url.endswith("/me/messages"):
+            return {"id": "draft-big-1", "webLink": "https://outlook.office.com/mail/id/draft-big-1"}
+        if url.endswith("/attachments/createUploadSession"):
+            assert payload["AttachmentItem"] == {"attachmentType": "file", "name": "large_manual.pdf", "size": large_size}
+            return {"uploadUrl": "https://outlook.office.com/api/upload/session-abc"}
+        if method == "PUT" and url == "https://outlook.office.com/api/upload/session-abc":
+            uploaded_chunks.extend(payload["chunk"])
+            return {}
+        return {}
+
+    outlook.set_msal_factory(lambda cid, auth, cache: _FakeApp())
+    outlook.set_graph_backend(fake_graph)
+
+    no = add("arjun_mehta.txt")
+    read_all()
+    invitation.save_draft(no, "Large attachment test", "Hello\n\nPlease see manual.", "2026-12-29", ["large_manual.pdf"])
+    sent = invitation.send(no)
+    assert sent["how"] == "graph"
+    assert bytes(uploaded_chunks) == large_bytes
+
+    put_calls = [c for c in requests_seen if c[0] == "PUT"]
+    assert len(put_calls) == 2
+    assert put_calls[0][2]["content_range"] == f"bytes 0-{outlook.UPLOAD_CHUNK_BYTES - 1}/{large_size}"
+    assert put_calls[0][2]["content_length"] == outlook.UPLOAD_CHUNK_BYTES
+    assert put_calls[0][2]["content_length"] % 327_680 == 0
+    assert put_calls[1][2]["content_range"] == f"bytes {outlook.UPLOAD_CHUNK_BYTES}-{large_size - 1}/{large_size}"
+    assert requests_seen[-1][1].endswith("/me/messages/draft-big-1/send")
+
+
+def test_graph_failure_triggers_office365_smtp_fallback_and_cleans_draft(mail):
+    from hiring import outlook
+
+    outlook.save_settings({
+        "mode": "graph",
+        "client_id": "11111111-2222-3333-4444-555555555555",
+        "smtp_user": "hr@slt.com.lk",
+        "smtp_password": "app-password",
+        "smtp_fallback": True,
+    })
+
+    class _FakeApp:
+        def get_accounts(self):
+            return [{"username": "hr.sender@slt.com.lk", "name": "HR Sender"}]
+
+        def acquire_token_silent(self, scopes, account=None):
+            return {"access_token": "graph-token-fail"}
+
+    graph_calls: list[tuple[str, str]] = []
+    smtp_msgs = []
+
+    def failing_graph(method, url, payload, token, cfg):
+        graph_calls.append((method, url))
+        if method == "POST" and url.endswith("/me/messages"):
+            return {"id": "draft-orphan-1", "webLink": ""}
+        if method == "POST" and "/attachments" in url:
+            raise outlook.OutlookError("Graph throttled (503)")
+        return {}
+
+    def fake_smtp(msg, cfg):
+        smtp_msgs.append((msg, cfg))
+        return "<smtp-fallback-1@slt.com.lk>"
+
+    outlook.set_msal_factory(lambda cid, auth, cache: _FakeApp())
+    outlook.set_graph_backend(failing_graph)
+    outlook.set_smtp_backend(fake_smtp)
+
+    no = add("arjun_mehta.txt")
+    read_all()
+    sent = invitation.send(no)
+    assert sent["how"] == "smtp"
+    assert sent["sender"] == "hr@slt.com.lk"
+    assert ("DELETE", "https://graph.microsoft.com/v1.0/me/messages/draft-orphan-1") in graph_calls
+    assert len(smtp_msgs) == 1
+    msg, _ = smtp_msgs[0]
+    assert "X-Unsent" not in msg
+    assert "hr@slt.com.lk" in msg["From"]
+    assert sorted(p.get_filename() for p in msg.iter_attachments()) == sorted(REQUIRED)
+
+
+def test_send_failure_without_fallback_leaves_candidate_unsent(mail):
+    from hiring import outlook
+
+    outlook.save_settings({
+        "mode": "graph",
+        "client_id": "11111111-2222-3333-4444-555555555555",
+        "smtp_fallback": False,
+    })
+    no = add("arjun_mehta.txt")
+    read_all()
+    with pytest.raises(invitation.MailProblem, match="sign in"):
+        invitation.send(no)
+    c = db.get_candidate(no)
+    assert (c.invite or {}).get("status") != "sent"
+    assert invitation.row(c)["status"] == "Not mailed"
+
+
+def test_mail_test_endpoint_eml_download_and_university_faculty_edge_case(mail):
+    assert tools.find_university(["BSc (Hons), Faculty of Information Technology, University of Moratuwa (2022 - 2026)"]) == \
+        "University of Moratuwa"
+
+    r = mail.post("/api/mail/test", headers=HR, json={"to": "supervisor@outlook.com"})
+    assert r.status_code == 200, r.text
+    res = r.json()
+    assert res["ok"] is True and res["how"] == "eml"
+    assert sorted(res["attachments"]) == sorted(REQUIRED)
+    assert res["total_bytes"] > 3_000_000
+
+    no = add("arjun_mehta.txt")
+    read_all()
+    assert mail.post(f"/api/candidates/{no}/mail/send", headers=HR, json={}).status_code == 200
+    eml = mail.get(f"/api/candidates/{no}/mail/eml")
+    assert eml.status_code == 200 and eml.headers["content-type"].startswith("message/rfc822")
+    assert eml.content[:40]
+

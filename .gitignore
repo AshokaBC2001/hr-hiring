@@ -1,5 +1,10 @@
 .venv/
+.env
 data/
 __pycache__/
 *.pyc
 screenshots/
+screenshots_mail/
+.DS_Store
+.pytest_cache/
+Outlook_Mail_and_Performance_Changes.pdf

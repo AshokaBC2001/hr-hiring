@@ -1,6 +1,6 @@
-# HR Hiring
+# SLT HR Hiring
 
-A local, AI-assisted hiring workflow. Four AI agents handle the routine work of screening CVs, scheduling interviews and drafting emails. Two people make every decision that matters.
+A local, AI-assisted intern hiring workflow built for **SLT (Sri Lanka Telecom)**. Five AI agents handle the routine work of screening CVs, tracking intern vacancies, scheduling interviews, preparing placement letters, and drafting/sending Outlook emails. Two people make every decision that matters.
 
 | Role | Type | Responsibility |
 |---|---|---|
@@ -14,20 +14,22 @@ A local, AI-assisted hiring workflow. Four AI agents handle the routine work of 
 
 ## Features
 
-- Runs fully on your own machine. CVs never leave the computer.
-- Reads the intern records from Talent Hub (MongoDB) and never writes to them.
+- Runs locally on your machine with SQLite and llama.cpp (no local database server required).
+- Reads intern records from Talent Hub (example JSON or read-only MongoDB connection string) and never writes to them.
 - Opens a vacancy when interns are about to finish, and suggests the best waiting CVs for it.
-- Local LLM (Gemma 3 4B by default) served by llama.cpp. No cloud API keys needed.
-- Scores are calculated by code, not by the model.
+- Local LLM (Gemma 3 4B by default) served by llama.cpp with flash-attention and KV prompt-cache reuse.
+- Scores are calculated by code, not by the model (with pre-tokenized CV and stem-prefix caching).
 - Every model answer is checked against the CV before it is saved.
-- Emails are drafted only. Nothing is sent. Released emails are saved to `data/outbox/` as `.eml` files
-  (double-click one to open it in Mail or Outlook).
+- Flexible Microsoft Outlook email integration (`hiring/mailer.py` + `hiring/outlook.py`):
+  - **Microsoft Graph sending (`graph` / `graph_draft`)** powered by Microsoft's official `msal` library (OAuth 2.0 Device Code Flow): creates an Outlook draft, adds each attachment one by one (using `createUploadSession` in 320 KiB chunks for files $\ge 3\text{ MB}$), and sends it.
+  - **Office 365 SMTP fallback (`smtp.office365.com:587`)** if Microsoft Graph fails or when SMTP AUTH is preferred.
+  - Default **`.eml` mode**: archives Outlook-ready `.eml` files (`X-Unsent: 1`) in `data/outbox/` alongside Outlook Web compose links.
 - After a Pass, a placement letter (plain A4 PDF) is made by code and attached to the acceptance email.
-- Plain web UI with two roles: HR officer and interviewer.
+- Plain web UI with two roles (plus **Mail-only mode** via `./start_mail.sh`).
 
 ## Tech stack
 
-Python, FastAPI, LangGraph, SQLAlchemy (SQLite), APScheduler, llama.cpp, pymongo (to read Talent Hub),
+Python, FastAPI, LangGraph, SQLAlchemy (SQLite in WAL mode), APScheduler, llama.cpp, `msal` + Microsoft Graph Mail API v1.0, `openpyxl`, pymongo (optional read-only Talent Hub lookup),
 fpdf2 (placement letter PDF), and plain HTML, CSS and JavaScript.
 
 ## Requirements
@@ -40,8 +42,9 @@ fpdf2 (placement letter PDF), and plain HTML, CSS and JavaScript.
 ## Installation
 
 ```bash
-git clone <your-repo-url>
-cd <repo-folder>
+git clone https://github.com/AshokaBC2001/hr-hiring.git
+cd hr-hiring
+git checkout feature/mail-only-mode
 bash setup.sh
 ```
 
@@ -98,10 +101,11 @@ On each candidate page:
 3. **Register details:** after the student replies, fill NIC / PP, Tel No and Laptop Serial No, choose a status,
    and give the reference number. The next number is suggested from the last one used.
 
-**Sending:** `hiring/mailer.py` is the handover point for Outlook sending. Until it is connected, a sent mail is
-saved in `data/outbox/` as an `.eml` file with the attachments inside (double-click it to open it in Mail or Outlook).
-With all three standard attachments the mail is about 4.5 MB, which is over the 4 MB limit of a single Microsoft Graph
-request, so attachments must be added to a draft one by one (see the note in `hiring/mailer.py`).
+**Sending:** `hiring/mailer.py` (backed by `hiring/outlook.py`) handles Outlook delivery:
+- **Microsoft Graph (`graph` mode):** Signs in via Microsoft OAuth 2.0 Device Code Flow (`msal`), creates a draft (`POST /v1.0/me/messages`), attaches every file one by one (automatically switching to `createUploadSession` in 320 KiB-aligned chunks for files $\ge 3\text{ MB}$ such as `individual user manual.pdf`), and sends (`POST /v1.0/me/messages/{id}/send`).
+- **Office 365 SMTP fallback (`smtp.office365.com:587`):** Automatically falls back to Office 365 STARTTLS SMTP if Graph fails and SMTP credentials are saved (or can be selected directly in **Mail settings → Outlook sending**).
+- **`.eml` archive (`eml` mode, default):** Saves an Outlook-ready `.eml` file in `data/outbox/` with all attachments inside (double-click it to open in Mail or Outlook). Sent mails in `graph`/`smtp` modes are also archived to `data/outbox/`.
+- **Real test send:** Configure Outlook on **Mail settings**, enter a test inbox email, and click **Send test mail** (or run `.venv/bin/python run.py mail-test --target <email>`).
 
 The template is `shared/mail/invitation.txt` and the subject and sender are in `shared/mail/mail.json`.
 The four required attachments (Hospital_system.pdf, individual user manual.pdf, POS Task Backlog.xlsx and
@@ -171,6 +175,7 @@ Talent Hub (read only)
 
 | What | Where |
 |---|---|
+| Outlook Graph / SMTP sending & Demo redirect | **Mail settings → Outlook sending**, **Replies → Outlook settings**, or `HR_OUTLOOK_*` / `.env` |
 | Areas, required skills and related studies | **Areas** page |
 | Which areas a CV is suggested for | `POOL_MIN_SCORE`, `POOL_CLOSE_POINTS`, `POOL_SUGGEST_AREAS`, `SHARED_SKILL_AREAS` in `hiring/config.py` |
 | Talent Hub: source, address and field names | `TALENTHUB_*` in `hiring/config.py` |
@@ -192,7 +197,7 @@ To reset all data, stop the app and delete the `data` folder.
 setup.sh, start_model.sh, start_app.sh   setup and start scripts
 start_mail.sh                            starts the app in mail-only mode
 app.py                                   web app entry point
-run.py                                   CLI helpers: check, samples, once, brief, status
+run.py                                   CLI helpers: check, samples, once, brief, status, outlook-*, mail-test
 employees/                               the 5 AI agents (Markdown)
 shared/areas.json                        starter areas
 shared/example_interns.json              made-up intern records (until Talent Hub access is granted)
@@ -202,9 +207,9 @@ hiring/
   config.py     settings               db.py         database (SQLite)
   llm.py        llama-server client    checks.py     checks on model answers
   talenthub.py  reads Talent Hub       vacancies.py  vacancies and suggestions
-  letters.py    placement letter PDF and the .eml email files
+  letters.py    placement letter PDF   outlook.py    Microsoft Outlook (MSAL, Graph Upload Session, SMTP)
   invitation.py invitation mail, attachments and the intern register (mail-only mode)
-  mailer.py     sends a finished mail: the handover point for Outlook
+  mailer.py     multi-step Outlook sender + Office 365 SMTP fallback + .eml archiver
   tools.py      CV reading, scoring, scheduling, templates
   employees.py  loads agent folders, checked model calls
   flows.py      LangGraph workflows    scheduler.py  APScheduler jobs
@@ -266,6 +271,7 @@ To refresh the made-up intern records so the demo dates are near today:
 
 - The Markdown agent structure (ROLE, SCHEDULE, RELEASES and SKILL files) follows the idea from [markfulton/ai-employees](https://github.com/markfulton/ai-employees).
 - The placement letter feature follows the approach of [faizanfirdousi/appointment-letter-automation](https://github.com/faizanfirdousi/appointment-letter-automation) (MIT license): a letter template and an email template, with the letter PDF attached to the email.
+- Microsoft Outlook authentication and Graph Mail integration use Microsoft's official [AzureAD/microsoft-authentication-library-for-python](https://github.com/AzureAD/microsoft-authentication-library-for-python) (`msal`, MIT license) with the Microsoft Graph Mail API v1.0.
 - The PDF is made with [fpdf2](https://github.com/py-pdf/fpdf2) (LGPL-3.0), installed as a library.
 - The letter font is DejaVu Sans (Bitstream Vera license, see `shared/letter/fonts/LICENSE.txt`).
 - All people in `samples/` are fictional.

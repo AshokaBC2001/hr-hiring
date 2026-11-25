@@ -124,6 +124,31 @@ def rule_profile(cv_text: str, vocab: list[str]) -> dict:
     }
 
 
+UNIVERSITY_WORDS = ("university", "institute", "campus", "college", "academy", "school", "polytechnic",
+                    "faculty of")
+UNIVERSITY_SHORT = ("SLIIT", "IIT", "KDU", "NSBM", "NIBM", "SLTC", "APIIT", "ICBT", "ESOFT", "UCSC", "CINEC",
+                    "BCAS", "SLIATE", "IIT Madras", "IIT Bombay", "UOM", "UOC", "UOK", "UOJ", "UOP", "UOR")
+
+
+def find_university(education: list[str]) -> str:
+    """The university or institute named in the education lines (plain code, no model).
+    For example "B.Tech in Data Science, Indian Institute of Technology Madras (2021 - 2025)"
+    gives "Indian Institute of Technology Madras". Returns "" when none is named."""
+    for line in education:
+        for part in re.split(r"[,|;\n]| - | – | — |\(|\)|\s+at\s+|\s+from\s+", line):
+            part = re.sub(r"\b(19|20)\d{2}\b.*$", "", part).strip(" .:-–—")
+            low = part.lower()
+            if any(w in low for w in UNIVERSITY_WORDS) and len(part) <= 120:
+                return re.sub(r"^(at|from)\s+", "", part, flags=re.I)
+            if part.upper() in UNIVERSITY_SHORT:
+                return part
+    for line in education:                      # a short name such as SLIIT inside a longer line
+        for short in UNIVERSITY_SHORT:
+            if re.search(rf"\b{re.escape(short)}\b", line):
+                return short
+    return ""
+
+
 # ---- Scoring ---------------------------------------------------------------------------
 def _area_terms(area) -> list[str]:
     return list(area.required_skills or []) + list(area.preferred_skills or []) + list(area.keywords or [])

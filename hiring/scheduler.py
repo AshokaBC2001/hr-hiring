@@ -5,7 +5,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import flows
+from . import config, flows
 from .employees import EMPLOYEES, schedule
 
 _scheduler: BackgroundScheduler | None = None
@@ -19,7 +19,7 @@ def start() -> BackgroundScheduler:
     for key in EMPLOYEES:
         plan = schedule(key)
         if key == "planner":
-            if plan["daily_at"]:
+            if plan["daily_at"] and config.MODE != "mail":     # no vacancies in mail-only mode
                 h, m = plan["daily_at"].split(":")
                 s.add_job(flows.run_planner, CronTrigger(hour=int(h), minute=int(m)), kwargs={"wait": True},
                           id=key, name=EMPLOYEES[key])

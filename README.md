@@ -75,6 +75,39 @@ To check that the model returns valid JSON:
 
 If you see "permission denied", run `bash start_model.sh` and `bash start_app.sh` instead.
 
+## Mail-only mode
+
+For testing the invitation mail on its own. Start the app with `./start_mail.sh` in terminal 2
+(instead of `./start_app.sh`). On Windows, run `set HR_MODE=mail` and then start the app as usual.
+The model is still needed, because the Recruiter reads each CV.
+
+The menu then shows only three pages:
+
+| Page | What it does |
+|---|---|
+| **Add CV** | Upload CVs and type the **Source** (who sent them). The Recruiter reads the name, email, university and area. |
+| **Register** | One row per CV, in the same columns as the section's intern sheet, with **Export to Excel**. |
+| **Mail settings** | The required attachments (come with the template), extra attachments you add, and the mail template. |
+
+On each candidate page:
+
+1. **Invitation mail:** filled from the template. Pick the **visit date** (the next Tuesday is suggested); it is
+   written into the mail as `29-DEC-2026  (Tuesday)`. The subject, the text and the attachments can all be edited.
+2. **Preview** shows the mail as the student will see it, with clickable links. **Send mail** hands it over
+   for sending; the register gets the mail date and the status "Mail sent".
+3. **Register details:** after the student replies, fill NIC / PP, Tel No and Laptop Serial No, choose a status,
+   and give the reference number. The next number is suggested from the last one used.
+
+**Sending:** `hiring/mailer.py` is the handover point for Outlook sending. Until it is connected, a sent mail is
+saved in `data/outbox/` as an `.eml` file with the attachments inside (double-click it to open it in Mail or Outlook).
+With all three standard attachments the mail is about 4.5 MB, which is over the 4 MB limit of a single Microsoft Graph
+request, so attachments must be added to a draft one by one (see the note in `hiring/mailer.py`).
+
+The template is `shared/mail/invitation.txt` and the subject and sender are in `shared/mail/mail.json`.
+The four required attachments (Hospital_system.pdf, individual user manual.pdf, POS Task Backlog.xlsx and
+Trainee_Guidelines_Agreement.pdf) come with the template in `shared/mail/attachments/`. Extra files added on the
+Mail settings page, and newer versions of the required files, are kept in `data/mail/`, together with template changes.
+
 ## Quick demo
 
 1. Use the **Role** dropdown (top right) to choose **HR Officer**. Go to **Add CV** and click **Load the sample CVs**.
@@ -157,17 +190,21 @@ To reset all data, stop the app and delete the `data` folder.
 
 ```
 setup.sh, start_model.sh, start_app.sh   setup and start scripts
+start_mail.sh                            starts the app in mail-only mode
 app.py                                   web app entry point
 run.py                                   CLI helpers: check, samples, once, brief, status
 employees/                               the 5 AI agents (Markdown)
 shared/areas.json                        starter areas
 shared/example_interns.json              made-up intern records (until Talent Hub access is granted)
 shared/letter/                           letter settings and the font (DejaVu Sans)
+shared/mail/                             invitation mail template and mail settings (mail-only mode)
 hiring/
   config.py     settings               db.py         database (SQLite)
   llm.py        llama-server client    checks.py     checks on model answers
   talenthub.py  reads Talent Hub       vacancies.py  vacancies and suggestions
   letters.py    placement letter PDF and the .eml email files
+  invitation.py invitation mail, attachments and the intern register (mail-only mode)
+  mailer.py     sends a finished mail: the handover point for Outlook
   tools.py      CV reading, scoring, scheduling, templates
   employees.py  loads agent folders, checked model calls
   flows.py      LangGraph workflows    scheduler.py  APScheduler jobs
@@ -175,7 +212,7 @@ hiring/
 web/                                     front end (HTML, CSS, JavaScript)
 samples/                                 sample CVs (fictional people)
 tests/                                   tests and a fake model server
-data/                                    created at runtime: database, inbox, outbox, letters, logs, notes
+data/                                    created at runtime: database, inbox, outbox, letters, mail, logs, notes
 ```
 
 ## Testing
@@ -185,6 +222,7 @@ data/                                    created at runtime: database, inbox, ou
 ```
 
 The tests use a scripted fake model (`tests/fake_model.py`), so no real model is needed.
+`tests/test_mail.py` covers mail-only mode. `tests/ui_check_mail.py` clicks through it in a browser.
 
 To refresh the made-up intern records so the demo dates are near today:
 

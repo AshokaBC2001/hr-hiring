@@ -11,11 +11,11 @@ from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
-from . import actions, config, db, flows, letters, llm, scheduler, talenthub, tools, vacancies
+from . import actions, config, db, flows, invitation, letters, llm, scheduler, talenthub, tools, vacancies
 from .employees import EMPLOYEES, lessons, role_summary, routines, schedule
 
 VERSION = "1.0"
@@ -49,6 +49,11 @@ async def same_site_only(request: Request, call_next):
 
 @app.exception_handler(actions.ActionError)
 async def action_error(request: Request, exc: actions.ActionError):
+    return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.exception_handler(invitation.MailProblem)
+async def mail_problem(request: Request, exc: invitation.MailProblem):
     return JSONResponse({"detail": str(exc)}, status_code=400)
 
 
@@ -127,6 +132,9 @@ def detail(c: db.Candidate) -> dict:
         "questions_source": c.questions_source, "result_comment": c.result_comment, "result_at": c.result_at,
         "checklist": c.checklist or [],
         "letter": _letter_json(c),
+        "source": c.source or "", "university": c.university or "",
+        "invite": invitation.draft(c) if config.MODE == "mail" else None,
+        "register": invitation.row(c) if config.MODE == "mail" else None,
         "area_scores": [{"area": a, "score": sc} for a, sc in tools.top_areas(c.area_scores or {})],
         "active_areas": [a.name for a in db.active_areas()],
         "flags": [dict(f, index=i) for i, f in enumerate(c.flags or [])],
@@ -171,6 +179,7 @@ def state():
     hr_count = sum(counts.get(k, 0) for k in config.HR_STATUSES)
     return {
         "model": llm.health(), "notice": flows.NOTICE, "paused": db.get_setting("paused") == "1",
+        "mode": config.MODE,
         "counts": counts, "total": sum(counts.values()),
         "tiles": {"new": counts.get("new", 0), "review": hr_count + flagged, "release": waiting,
                   "interview": counts.get("awaiting_result", 0) + counts.get("on_hold", 0), "selected": selected,
@@ -243,6 +252,110 @@ async def save_letter(app_no: str, request: Request):
     _need_role(request, "hr")
     b = await request.json()
     return {"letter": actions.save_letter_dates(app_no, b.get("start_date", ""), b.get("end_date", ""))}
+
+
+# ---- Mail-only mode: the invitation mail, its settings and the register ----------------------
+@app.get("/api/mail/settings")
+def mail_settings():
+    s = invitation.settings()
+    return {"subject": s["subject"], "sender": s.get("sender", ""), "template": invitation.template(),
+            "attachments": invitation.attachments(), "visit_weekday": s.get("visit_weekday", "Tuesday"),
+            "next_visit_day": invitation.next_visit_day().isoformat(),
+            "statuses": invitation.REGISTER_STATUSES, "ref_suggestion": invitation.suggest_ref()}
+
+
+@app.post("/api/mail/settings")
+async def save_mail_settings(request: Request):
+    _need_role(request, "hr")
+    b = await request.json()
+    if b.get("reset"):
+        invitation.reset_settings()
+    else:
+        invitation.save_settings(b.get("subject", ""), b.get("template", ""))
+    return mail_settings()
+
+
+@app.post("/api/mail/attachments")
+async def upload_attachments(request: Request, files: list[UploadFile] = File(...)):
+    _need_role(request, "hr")
+    results = []
+    for f in files[:20]:
+        data = await f.read(config.MAIL_ATTACH_MAX_BYTES + 1)
+        results.append(invitation.add_attachment(f.filename or "file", data))
+    return {"results": results, "attachments": invitation.attachments()}
+
+
+@app.get("/api/mail/attachments/{name}")
+def get_attachment(name: str):
+    path = invitation.attachment_path(name)
+    if not path.exists():
+        raise invitation.MailProblem("That file is not in the attachments.")
+    return FileResponse(path, filename=path.name)
+
+
+@app.post("/api/mail/attachments/{name}/remove")
+def remove_attachment(name: str, request: Request):
+    _need_role(request, "hr")
+    invitation.remove_attachment(name)
+    return {"attachments": invitation.attachments()}
+
+
+@app.post("/api/candidates/{app_no}/mail")
+async def save_invite(app_no: str, request: Request):
+    _need_role(request, "hr")
+    b = await request.json()
+    return {"invite": invitation.save_draft(app_no, b.get("subject", ""), b.get("body", ""), b.get("visit_date", ""),
+                                        b.get("attachments", []))}
+
+
+@app.post("/api/candidates/{app_no}/mail/send")
+async def send_invite(app_no: str, request: Request):
+    _need_role(request, "hr")
+    b = await request.json()
+    if b.get("subject") is not None:          # save what is on the screen first
+        c = db.get_candidate(app_no)
+        if c is not None and (c.invite or {}).get("status") != "sent":
+            invitation.save_draft(app_no, b.get("subject", ""), b.get("body", ""), b.get("visit_date", ""),
+                              b.get("attachments", []))
+    return {"invite": invitation.send(app_no)}
+
+
+@app.get("/api/candidates/{app_no}/mail/preview", response_class=HTMLResponse)
+def preview_invite(app_no: str):
+    """The mail as the student will see it."""
+    c = db.get_candidate(app_no)
+    if c is None:
+        raise invitation.MailProblem("Candidate not found.")
+    d = invitation.draft(c)
+    esc = __import__("html").escape
+    files = "".join(f"<li>{esc(n)}</li>" for n in d.get("attachments", [])) or "<li>No attachments</li>"
+    head = (f'<div style="font-family:Arial,sans-serif;font-size:13px;color:#333;border-bottom:1px solid #ccc;'
+            f'padding-bottom:10px;margin-bottom:16px"><b>To:</b> {esc(c.name)} &lt;{esc(c.email or "no email yet")}&gt;<br>'
+            f'<b>Subject:</b> {esc(d["subject"])}<br><b>Attachments:</b><ul style="margin:4px 0">{files}</ul>'
+            f'<span style="color:#888">Preview only. Nothing is sent from this page.</span></div>')
+    return HTMLResponse(f'<!doctype html><html><head><meta charset="utf-8"><title>Mail preview - {esc(c.name)}</title></head>'
+                        f'<body style="max-width:820px;margin:24px auto;padding:0 16px">{head}{invitation.to_html(d["body"])}</body></html>')
+
+
+@app.post("/api/candidates/{app_no}/register")
+async def save_register(app_no: str, request: Request):
+    _need_role(request, "hr")
+    return {"register": invitation.save_row(app_no, await request.json()), "ref_suggestion": invitation.suggest_ref()}
+
+
+@app.get("/api/register")
+def register(show: str = "all", q: str = ""):
+    data = invitation.rows(show, q)
+    counts = {k: len(invitation.rows(k)) for k in ("all", "sent", "not_sent")}
+    return {"rows": data, "columns": invitation.REGISTER_COLUMNS, "counts": counts}
+
+
+@app.get("/api/register.xlsx")
+def register_xlsx(show: str = "all", q: str = ""):
+    name = f"Intern_register_{date.today().isoformat()}.xlsx"
+    return Response(invitation.export_xlsx(invitation.rows(show, q)),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.get("/api/review")
@@ -489,12 +602,13 @@ def team():
 
 # ---- changing (HR officer) -------------------------------------------------------------------
 @app.post("/api/cvs")
-async def upload_cvs(request: Request, files: list[UploadFile] = File(...), email: str = Form("")):
+async def upload_cvs(request: Request, files: list[UploadFile] = File(...), email: str = Form(""),
+                      source: str = Form("")):
     _need_role(request, "hr")
     results = []
     for f in files[:30]:
         data = await f.read(config.MAX_UPLOAD_BYTES + 1)
-        results.append(actions.add_cv(f.filename or "cv", data, email if len(files) == 1 else ""))
+        results.append(actions.add_cv(f.filename or "cv", data, email if len(files) == 1 else "", source))
     if any(r["ok"] for r in results):
         _kick()
     return {"results": results}

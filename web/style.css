@@ -167,3 +167,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .3); }
 @media (max-width: 560px) {
   .nums { grid-template-columns: 1fr 1fr; }
 }
+
+/* mail-only mode */
+label.check { display: flex; align-items: center; gap: 8px; font-weight: normal; margin: 4px 0; }
+label.check input { width: auto; }
+.wide { overflow-x: auto; }
+.reg-list td, .reg-list th { white-space: nowrap; font-size: 13px; }
+input[type=date] { border: 1px solid #bbb; border-radius: 3px; padding: 5px 8px; background: #fff; }

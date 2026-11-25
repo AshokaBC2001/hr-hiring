@@ -58,6 +58,10 @@ class Candidate(Base):
     work_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     checklist: Mapped[list] = mapped_column(JSON, default=list)
     letter: Mapped[dict] = mapped_column(JSON, default=dict)        # placement letter: start/end date, file
+    source: Mapped[str] = mapped_column(String(200), default="")     # who sent us the CV (mail-only mode)
+    university: Mapped[str] = mapped_column(String(200), default="") # read from the CV's education
+    invite: Mapped[dict] = mapped_column(JSON, default=dict)        # the invitation mail (mail-only mode)
+    register: Mapped[dict] = mapped_column(JSON, default=dict)      # the intern register row (mail-only mode)
     flags: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[str] = mapped_column(String(40), default="")
     updated_at: Mapped[str] = mapped_column(String(40), default="")
@@ -171,6 +175,10 @@ class Paths:
     @property
     def letters(self) -> Path: return self.data / "letters"
     @property
+    def mail(self) -> Path: return self.data / "mail"
+    @property
+    def mail_attachments(self) -> Path: return self.data / "mail" / "attachments"
+    @property
     def run_logs(self) -> Path: return self.data / "run-logs"
     @property
     def notes(self) -> Path: return self.data / "notes"
@@ -193,7 +201,8 @@ def setup(data_dir: Path | None = None) -> None:
     global _engine
     if data_dir is not None:
         paths.data = Path(data_dir)
-    for d in (paths.data, paths.inbox, paths.outbox, paths.letters, paths.run_logs, paths.notes):
+    for d in (paths.data, paths.inbox, paths.outbox, paths.letters, paths.mail, paths.mail_attachments,
+              paths.run_logs, paths.notes):
         d.mkdir(parents=True, exist_ok=True)
     _engine = create_engine(f"sqlite:///{paths.db}", connect_args={"check_same_thread": False, "timeout": 30})
     Session.configure(bind=_engine)
@@ -226,6 +235,10 @@ def _add_missing_columns() -> None:
             conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN vacancy_id INTEGER")
         if "letter" not in have:
             conn.exec_driver_sql("ALTER TABLE candidates ADD COLUMN letter JSON DEFAULT '{}'")
+        for col, kind in (("source", "VARCHAR(200) DEFAULT ''"), ("university", "VARCHAR(200) DEFAULT ''"),
+                          ("invite", "JSON DEFAULT '{}'"), ("register", "JSON DEFAULT '{}'")):
+            if col not in have:
+                conn.exec_driver_sql(f"ALTER TABLE candidates ADD COLUMN {col} {kind}")
         have = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(areas)")}
         if "studies" not in have:
             conn.exec_driver_sql("ALTER TABLE areas ADD COLUMN studies JSON DEFAULT '[]'")

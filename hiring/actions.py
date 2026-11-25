@@ -42,7 +42,7 @@ def _resolve_flags(c: db.Candidate, starts: tuple[str, ...]) -> list:
 
 
 # ---- Adding CVs (HR officer) ----------------------------------------------------------
-def add_cv(filename: str, data: bytes, typed_email: str = "") -> dict:
+def add_cv(filename: str, data: bytes, typed_email: str = "", source: str = "") -> dict:
     name = Path(filename or "cv").name[:200]
     ext = Path(name).suffix.lower()
     if ext not in config.ALLOWED_CV_TYPES:
@@ -70,6 +70,7 @@ def add_cv(filename: str, data: bytes, typed_email: str = "") -> dict:
     with db.Session() as s:
         c = db.Candidate(app_no=app_no, cv_filename=name, cv_stored=stored, cv_hash=h, cv_text=text,
                          email=typed_email, email_source="Typed by HR officer" if typed_email else "",
+                         source=(source or "").strip()[:200],
                          status="new", created_at=db.now(), updated_at=db.now(),
                          profile={}, area_reasons=[], area_evidence=[], score_parts={}, gaps=[], questions=[],
                          checklist=[], flags=[])

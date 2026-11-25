@@ -9,4 +9,5 @@ python-multipart>=0.0.9
 httpx>=0.27
 pymongo>=4.6          # only used to read Talent Hub
 fpdf2>=2.7            # placement letter PDF (py-pdf/fpdf2)
+openpyxl>=3.1         # Excel export of the intern register
 pytest>=8

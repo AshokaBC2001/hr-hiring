@@ -94,6 +94,13 @@ INTERVIEW_TIMES = ["09:30", "10:15", "11:00", "11:45", "14:00", "14:45", "15:30"
 
 SCHEDULER_ENABLED = os.environ.get("HR_SCHEDULER", "1") != "0"
 
+# ---- Mail-only mode ------------------------------------------------------------------------
+# "full": the whole hiring system. "mail": only Add CV, the invitation mail and the register,
+# for testing the mail part on its own. Start with:  HR_MODE=mail ./start_app.sh
+MODE = "mail" if os.environ.get("HR_MODE", "full").strip().lower() == "mail" else "full"
+MAIL_ATTACH_TYPES = {".pdf", ".xlsx", ".xls", ".docx", ".doc"}
+MAIL_ATTACH_MAX_BYTES = 10 * 1024 * 1024      # per file
+
 # ---- Statuses: label shown to people, chip colour, who acts next ----------------
 STATUSES = {
     "new":                   ("New CV", "gray", "Recruiter"),

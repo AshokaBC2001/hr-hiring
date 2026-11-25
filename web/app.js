@@ -20,7 +20,8 @@ let STATE = null;
 let lastHTML = "";
 let current = { page: "", arg: "" };
 const UI = { showCv: false, showRuns: false, editDraft: null, editEmail: false, letterDates: null, candFilter: "selected", candQuery: "",
-             poolArea: "", poolShow: "all", poolQuery: "", cvEmail: "",
+             poolArea: "", poolShow: "all", poolQuery: "", cvEmail: "", cvSource: "", inviteEdit: null, regEdit: null,
+             regShow: "all", regQuery: "", candidateFrom: "",
              vacShow: "open", internShow: "all", internQuery: "",
              repliesTab: "waiting", showAll: "", files: [], uploadResults: null, areas: null };
 
@@ -110,18 +111,23 @@ const NAV = {
        ["interns", "Interns"], ["areas", "Areas"], ["team", "AI team"]],
   interviewer: [["interviews", "Interviews", "interview"], ["team", "AI team"]],
 };
-const HOME = { hr: "#/dashboard", interviewer: "#/interviews" };
+NAV.mail = [["add", "Add CV"], ["register", "Register"], ["mailsettings", "Mail settings"]];
+const HOME = { hr: "#/dashboard", interviewer: "#/interviews", mail: "#/add" };
+const MAILMODE = () => !!(STATE && STATE.mode === "mail");
+const NK = () => (MAILMODE() ? "mail" : ROLE);       // which menu, home page and routes to use
 
 function renderFrame() {
   const t = STATE ? STATE.tiles : {};
-  $("#nav").innerHTML = NAV[ROLE].map(([key, label, countKey]) => {
+  $("#nav").innerHTML = NAV[NK()].map(([key, label, countKey]) => {
     const count = countKey && t[countKey] ? `<span class="count">${esc(t[countKey])}</span>` : "";
-    const onCandidate = current.page === "candidate" && (key === (UI.candidateInPool ? "add" : "candidates"));
+    const onCandidate = current.page === "candidate" && (key === (MAILMODE() ? UI.candidateFrom || "add" : UI.candidateInPool ? "add" : "candidates"));
     const on = current.page === key || onCandidate || (key === "interviews" && current.page === "interview") || (key === "add" && current.page === "pool");
     return `<a class="${on ? "on" : ""}" href="#/${key}">${esc(label)}${count}</a>`;
   }).join("");
-  $("#brand").href = HOME[ROLE];
+  $("#brand").href = HOME[NK()];
   $("#role-select").value = ROLE;
+  const roleBox = $("#role-select").closest("label") || $("#role-select");
+  roleBox.style.display = MAILMODE() ? "none" : "";
   if (!STATE) return;
   const m = STATE.model;
   const down = !m.ok || (STATE.notice && STATE.notice.text);
@@ -130,7 +136,9 @@ function renderFrame() {
   el.className = "model" + (down ? " down" : "");
   el.title = down ? ((STATE.notice && STATE.notice.text) || m.detail || "") : m.model;
   const working = Object.values(STATE.team).find((x) => x.state === "working");
-  $("#foot").textContent = `${APP_NAME} - prototype. Emails are drafted only, never sent. AI team: ${STATE.paused ? "paused" : working ? working.name + " is working" : "waiting for work"}.`;
+  $("#foot").textContent = MAILMODE()
+    ? `${APP_NAME} - mail-only mode. Mails are saved to the outbox until Outlook sending is connected. AI team: ${working ? working.name + " is working" : "waiting for work"}.`
+    : `${APP_NAME} - prototype. Emails are drafted only, never sent. AI team: ${STATE.paused ? "paused" : working ? working.name + " is working" : "waiting for work"}.`;
 }
 async function refreshState() {
   try { STATE = await api("/api/state"); } catch { return; }
@@ -243,6 +251,7 @@ async function pDashboard() {
 const POOL_SHOW = [["all", "All"], ["recent", "Recently added"], ["no_area", "No matching area"], ["archived", "Archived"]];
 async function pAdd(arg) {
   title("Add CV");
+  UI.candidateFrom = "add";
   if (POOL_SHOW.some((x) => x[0] === arg)) UI.poolShow = arg;
   const qs = new URLSearchParams({ area: UI.poolArea, show: UI.poolShow, q: UI.poolQuery });
   const r = await api(`/api/pool?${qs}`);
@@ -255,7 +264,7 @@ async function pAdd(arg) {
       ${files.map((f, i) => `<tr><td>${esc(f.name)}</td><td class="small muted">${Math.ceil(f.size / 1024)} KB</td>
         <td style="text-align:right"><button class="btn small" data-act="remove-file" data-i="${i}">Remove</button></td></tr>`).join("")}</tbody></table>` : "";
   const resultLine = results.length ? `<div class="upload-result">
-      ${added.size ? `<p class="small" style="margin:0">${added.size} CV(s) added. They are at the top of the list below, marked New. The Recruiter reads each one and fills in its area and score.</p>` : ""}
+      ${added.size ? `<p class="small" style="margin:0">${added.size} CV(s) added. They are at the top of the list below, marked New. The Recruiter reads each one and fills in its area and score.${MAILMODE() ? " Open a CV to prepare its invitation mail." : ""}</p>` : ""}
       ${notAdded.length ? `<table class="t" style="margin-top:6px"><tbody>${notAdded.map((x) => `<tr><td>${esc(x.file)}</td><td>${tag("Not added", "fail")} <span class="small muted">${esc(x.reason)}</span></td></tr>`).join("")}</tbody></table>` : ""}</div>` : "";
 
   const st = r.stats;
@@ -290,6 +299,9 @@ async function pAdd(arg) {
           <div class="form-row"><label for="cv-email">Candidate's email (optional)</label>
             <input type="email" id="cv-email" value="${files.length > 1 ? "" : esc(UI.cvEmail)}" placeholder="${files.length > 1 ? "Only for a single CV" : "name@example.com"}" ${files.length > 1 ? "disabled" : ""}>
             <div class="help">If you type it, replies use this address. If you leave it empty, the Recruiter reads it from the CV and you confirm it.</div></div>
+          <div class="form-row"><label for="cv-source">Source (optional)</label>
+            <input type="text" id="cv-source" value="${esc(UI.cvSource)}" placeholder="Who sent the CV, for example a name or an email address">
+            <div class="help">Saved with every CV in this upload. It is the Source column of the register.</div></div>
           <p class="small muted">${files.length ? `${files.length} file(s) chosen.` : "No files chosen yet."}</p>
           <div class="actions"><button class="btn primary" data-act="upload" ${files.length ? "" : "disabled"}>Add ${files.length > 1 ? files.length + " CVs" : "CV"}</button>
             ${files.length ? `<button class="btn" data-act="clear-files">Clear</button>` : ""}
@@ -309,6 +321,8 @@ async function pAdd(arg) {
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles(e.dataTransfer.files); };
   const em = $("#cv-email");
   em.oninput = () => { UI.cvEmail = em.value; };
+  const so = $("#cv-source");
+  so.oninput = () => { UI.cvSource = so.value; };
   $("#pool-area").onchange = (e) => { UI.poolArea = e.target.value; e.target.blur(); lastHTML = ""; pAdd(); };
   const qi = $("#pool-q");
   qi.oninput = () => { UI.poolQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pAdd().then(() => { const n = $("#pool-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
@@ -462,6 +476,9 @@ function nextStep(c, areas) {
 
 async function pCandidate(appNo) {
   title("Candidate");
+  if (MAILMODE() && !UI.mailFiles) {
+    try { const s = await api("/api/mail/settings"); UI.mailFiles = s.attachments; UI.mailStatuses = s.statuses; UI.refSuggestion = s.ref_suggestion; } catch { /* shown as empty */ }
+  }
   const [c, areas] = await Promise.all([api(`/api/candidates/${encodeURIComponent(appNo)}`), UI.areas ? Promise.resolve(UI.areas) : api("/api/areas")]);
   UI.areas = areas;
   const p = c.profile || {};
@@ -481,11 +498,13 @@ async function pCandidate(appNo) {
   if (UI.candidateInPool !== inPool) { UI.candidateInPool = inPool; renderFrame(); }
   const allScores = (c.area_scores || []).length ? `<details class="field"><summary class="label" style="cursor:pointer">Scores for every area (${c.area_scores.length})</summary>
       <table class="t"><tbody>${c.area_scores.map((x) => `<tr><td>${esc(x.area)}</td><td class="num-col">${esc(x.score)}</td></tr>`).join("")}</tbody></table></details>` : "";
-  setView(`${inPool ? `<a class="back" href="#/add">&larr; CV pool</a>` : `<a class="back" href="#/candidates">&larr; All candidates</a>`}
+  const back = MAILMODE() ? (UI.candidateFrom === "register" ? `<a class="back" href="#/register">&larr; Register</a>` : `<a class="back" href="#/add">&larr; CV pool</a>`)
+    : inPool ? `<a class="back" href="#/add">&larr; CV pool</a>` : `<a class="back" href="#/candidates">&larr; All candidates</a>`;
+  setView(`${back}
     <div class="box"><div class="box-head"><h2 style="font-size:18px">${esc(c.name)}</h2><div class="spacer"></div>
       <a class="btn" href="/api/candidates/${encodeURIComponent(c.app_no)}/cv">Download CV</a></div>
       <div class="actions">${esc(c.app_no)} ${statusTag(c)}${c.area ? ` <span>Area: ${esc(c.area)}</span>` : ""}${c.score != null ? ` <span>Score: ${esc(c.score)}/100</span>` : ""}${c.work_id ? ` <b>Work ID ${esc(c.work_id)}</b>` : ""}</div></div>
-    ${ROLE === "hr" ? nextStep(c, areas.areas) : notice("ok", "You are viewing this as the Interviewer.", "Open it from the Interviews page to enter a result.")}
+    ${MAILMODE() ? (c.status === "new" ? notice("ok", "The Recruiter is reading this CV.", "The mail can be sent when it has finished.") : "") : ROLE === "hr" ? nextStep(c, areas.areas) : notice("ok", "You are viewing this as the Interviewer.", "Open it from the Interviews page to enter a result.")}
     ${flags.length ? `<div class="box">${boxHead("Notes to check", `<span class="small muted">From the AI team</span>`)}<table class="t"><tbody>
       ${flags.map((f) => `<tr><td>${esc(f.text)}<div class="small muted">${esc(f.by)} - ${esc(fmtTime(f.at))}</div></td>
         <td style="text-align:right">${ROLE === "hr" ? `<button class="btn small" data-act="resolve" data-i="${f.index}">Mark as checked</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : ""}
@@ -512,6 +531,7 @@ async function pCandidate(appNo) {
         <div class="field"><div class="label">Result</div><div>${c.result ? `${resultTag(c.result)} <span class="small muted">${esc(fmtTime(c.result_at))} - decided by the interviewer</span>` : `<span class="muted">Not entered yet</span>`}</div></div>
         ${c.result_comment ? `<div class="field"><div class="label">Interviewer's comment</div><div>${esc(c.result_comment)}</div></div>` : ""}</div>
         <div><div class="label">Questions for the interviewer</div>${c.questions.length ? `<ol class="clean">${c.questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>` : `<span class="muted">-</span>`}</div></div></div>` : ""}
+    ${MAILMODE() && c.invite ? inviteBox(c) + registerBox(c) : ""}
     ${c.letter ? letterBox(c) : ""}
     ${c.drafts.length ? `<div class="box" id="emails">${boxHead("Emails", `<span class="small muted">Nothing is sent without your release</span>`)}${c.drafts.slice().reverse().map((d) => mailBlock(d)).join("")}</div>` : ""}
     ${c.work_id ? `<div class="box">${boxHead("Onboarding")}
@@ -523,12 +543,168 @@ async function pCandidate(appNo) {
       ${UI.showRuns ? `<table class="t" style="margin-top:12px"><thead><tr><th>Time</th><th>Employee</th><th>Routine</th><th>Outcome</th><th class="num-col">Model calls</th><th class="num-col">Seconds</th></tr></thead><tbody>
         ${c.runs.map((r) => `<tr><td class="small muted">${esc(fmtTime(r.at))}</td><td>${esc(r.employee)}</td><td>${esc(r.routine)}</td><td>${outcomeText(r.outcome)}${r.note ? `<div class="small muted">${esc(r.note)}</div>` : ""}</td><td class="num-col">${esc(r.model_calls)}</td><td class="num-col">${esc(r.seconds)}</td></tr>`).join("")}</tbody></table>` : ""}</div>`);
   view.dataset.app = c.app_no;
+  if (MAILMODE()) bindInvite(c);
   const ls = $("#letter-start"), le = $("#letter-end");
   if (ls && le) {      // keep typed dates when the page refreshes itself
     const keepDates = () => { UI.letterDates = { app: c.app_no, start: ls.value, end: le.value }; };
     ls.oninput = ls.onchange = le.oninput = le.onchange = keepDates;
   }
 }
+// ---------------------------------------------------------------- mail-only mode
+const MAIL_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+function visitText(iso) {            // 29-DEC-2026  (Tuesday), the same as the server
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00");
+  return `${String(d.getDate()).padStart(2, "0")}-${MAIL_MONTHS[d.getMonth()]}-${d.getFullYear()}  (${WEEKDAY_NAMES[d.getDay()]})`;
+}
+function shortDate(iso) {            // 5-Sep-26, like the section's sheet
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00");
+  return `${d.getDate()}-${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]}-${String(d.getFullYear()).slice(2)}`;
+}
+const REG_TAG = { "Not mailed": "need", "Not coming": "fail", "Confirmed": "pass", "Visited": "pass" };
+function regTag(s) { return tag(s, REG_TAG[s] || ""); }
+
+function inviteValues(c) {
+  return UI.inviteEdit && UI.inviteEdit.app === c.app_no ? UI.inviteEdit : { app: c.app_no, ...c.invite };
+}
+function inviteBox(c) {
+  const v = inviteValues(c);
+  const url = `/api/candidates/${encodeURIComponent(c.app_no)}/mail/preview`;
+  const sent = c.invite.status === "sent";
+  const files = UI.mailFiles || [];
+  if (sent) {
+    return `<div class="box" id="invite">${boxHead("Invitation mail", tag("Mail sent", "pass"))}
+      <div class="field"><div class="label">To</div><div>${esc(c.name)} &lt;${esc(c.email)}&gt;</div></div>
+      <div class="field"><div class="label">Subject</div><div>${esc(c.invite.subject)}</div></div>
+      <div class="field"><div class="label">Sent</div><div>${esc(fmtTime(c.invite.sent_at))}${c.invite.file ? ` <span class="small muted">Saved to data/outbox/${esc(c.invite.file)}. Double-click it to open it in Mail.</span>` : ""}</div></div>
+      <div class="field"><div class="label">Attachments</div><div>${c.invite.attachments.length ? esc(c.invite.attachments.join(", ")) : `<span class="muted">No attachments</span>`}</div></div>
+      <div class="actions"><a class="btn" href="${url}" target="_blank" rel="noopener">View the mail</a></div></div>`;
+  }
+  const noEmail = !c.email ? notice("need", "No email address yet.", "Add it in the Profile box before sending.") : "";
+  return `<div class="box" id="invite">${boxHead("Invitation mail", tag(c.invite.status === "draft" ? "Saved, not sent" : "Not sent yet", "need"))}
+    ${noEmail}
+    <div class="grid two" style="align-items:start">
+      <div class="form-row" style="margin:0"><label>To</label><div>${c.email ? `${esc(c.name)} &lt;${esc(c.email)}&gt;` : `<span class="muted">No email yet</span>`}</div></div>
+      <div class="form-row" style="margin:0"><label for="inv-date">Visit date</label><input type="date" id="inv-date" value="${esc(v.visit_date || "")}">
+        <div class="help">Suggested: the next Tuesday. Changing it updates the date in the subject and the mail.</div></div>
+    </div>
+    <div class="form-row"><label for="inv-subject">Subject</label><input type="text" id="inv-subject" value="${esc(v.subject)}"></div>
+    <div class="form-row"><label for="inv-body">Mail</label><textarea id="inv-body" rows="22" style="font-family:inherit;font-size:13.5px">${esc(v.body)}</textarea>
+      <div class="help">Edit anything. Links become clickable in the sent mail.</div></div>
+    <div class="form-row"><label>Attachments</label>
+      ${files.length ? files.map((f) => `<label class="check"><input type="checkbox" class="inv-file" value="${esc(f.name)}" ${(v.attachments || []).includes(f.name) ? "checked" : ""}> ${esc(f.name)} <span class="small muted">${fmtSize(f.size)}</span></label>`).join("")
+        : `<div class="muted">No attachments uploaded yet. Add them in <a href="#/mailsettings">Mail settings</a>.</div>`}</div>
+    <div class="actions"><button class="btn" data-act="inv-save">Save</button><button class="btn" data-act="inv-preview">Preview</button>
+      <span class="spacer"></span><button class="btn primary" data-act="inv-send" ${c.email && c.status !== "new" ? "" : "disabled"}>Send mail</button></div></div>`;
+}
+function fmtSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
+function readInvite(app) {
+  return { app, visit_date: $("#inv-date").value, subject: $("#inv-subject").value, body: $("#inv-body").value,
+           attachments: [...document.querySelectorAll(".inv-file:checked")].map((x) => x.value) };
+}
+function bindInvite(c) {
+  const d = $("#inv-date");
+  if (d) {
+    const keep = () => { UI.inviteEdit = readInvite(c.app_no); };
+    ["#inv-subject", "#inv-body"].forEach((s) => { $(s).oninput = keep; });
+    document.querySelectorAll(".inv-file").forEach((x) => { x.onchange = keep; });
+    let before = d.value;
+    d.onchange = () => {
+      const oldText = visitText(before), newText = visitText(d.value);
+      const sub = $("#inv-subject"), body = $("#inv-body");
+      if (newText) {
+        let found = false;
+        for (const el of [sub, body]) {
+          for (const old of [oldText, "{visit_date}"]) {
+            if (old && el.value.includes(old)) { el.value = el.value.split(old).join(newText); found = true; }
+          }
+        }
+        if (!found) toast("The old date was not found in the mail. Check the Date line yourself.", true);
+      }
+      before = d.value;
+      keep();
+    };
+  }
+  document.querySelectorAll("#reg input, #reg select").forEach((x) => { x.oninput = x.onchange = () => { UI.regEdit = readRegister(c.app_no); }; });
+}
+const REG_FIELDS = [["ref_no", "No (reference)"], ["source", "Source"], ["university", "University"], ["technology", "Technology"],
+  ["name", "Name"], ["nic", "NIC / PP"], ["address", "Address / Company"], ["vehicle", "Vehicle No"], ["tel", "Tel No"], ["laptop", "Laptop Serial No"]];
+function readRegister(app) {
+  const out = { app };
+  REG_FIELDS.forEach(([k]) => { out[k] = $(`#reg-${k}`).value; });
+  out.status = $("#reg-status").value;
+  return out;
+}
+function registerBox(c) {
+  const r = UI.regEdit && UI.regEdit.app === c.app_no ? { ...c.register, ...UI.regEdit } : c.register;
+  const st = UI.mailStatuses || ["Not mailed", "Mail sent", "Replied", "Confirmed", "Not coming", "Visited"];
+  const sug = UI.refSuggestion && !r.ref_no ? `<button class="btn link small" data-act="reg-ref" data-ref="${esc(UI.refSuggestion)}">Use next: ${esc(UI.refSuggestion)}</button>` : "";
+  return `<div class="box" id="reg">${boxHead("Register details", regTag(c.register.status))}
+    <p class="small muted" style="margin-top:0">One row of the intern register. Fill NIC, Tel No and Laptop Serial No from the student's reply.
+      Mail date: <b>${c.register.mail_date ? esc(shortDate(c.register.mail_date)) : "not sent yet"}</b></p>
+    <div class="grid two">${REG_FIELDS.map(([k, label]) => `<div class="form-row" style="margin:0 0 10px"><label for="reg-${k}">${esc(label)}</label>
+      <input type="text" id="reg-${k}" value="${esc(r[k] || "")}">${k === "ref_no" ? sug : ""}</div>`).join("")}
+      <div class="form-row" style="margin:0 0 10px"><label for="reg-status">Status</label><select id="reg-status">${st.map((s) => `<option ${s === r.status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></div></div>
+    <div class="actions"><button class="btn primary" data-act="reg-save">Save details</button></div></div>`;
+}
+
+const REG_SHOW = [["all", "All"], ["sent", "Mail sent"], ["not_sent", "Not mailed yet"]];
+async function pRegister(arg) {
+  title("Register");
+  UI.candidateFrom = "register";
+  if (REG_SHOW.some((x) => x[0] === arg)) UI.regShow = arg;
+  const qs = new URLSearchParams({ show: UI.regShow, q: UI.regQuery });
+  const r = await api(`/api/register?${qs}`);
+  const cols = r.columns;
+  const cell = (row, k) => k === "mail_date" ? esc(shortDate(row[k])) : k === "status" ? regTag(row[k]) : k === "name" ? `<b>${esc(row[k] || "Reading…")}</b>` : esc(row[k] || "");
+  const table = r.rows.length ? `<div class="wide"><table class="t list reg-list"><thead><tr>${cols.map(([, l]) => `<th>${esc(l)}</th>`).join("")}</tr></thead><tbody>
+    ${r.rows.map((row) => `<tr class="click" data-href="#/candidate/${encodeURIComponent(row.app_no)}">${cols.map(([k]) => `<td>${cell(row, k)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
+    : empty(UI.regQuery ? "No row matches your search." : "No CVs yet. Add them on the Add CV page.");
+  setView(`<div class="box">${boxHead("Intern register", `<a class="btn" href="/api/register.xlsx?${qs}">Export to Excel</a>`)}
+    <div class="filters"><div class="tabs">${REG_SHOW.map(([k, l]) => `<button class="${UI.regShow === k ? "on" : ""}" data-act="reg-show" data-s="${k}">${esc(l)} (${esc(r.counts[k])})</button>`).join("")}</div>
+      <input type="search" class="search" id="reg-q" placeholder="Search any column" value="${esc(UI.regQuery)}"></div>
+    <p class="small muted" style="margin:0 0 8px">Name, University and Technology come from the CV. Mail date is filled when the mail is sent. Open a row to fill the details from the student's reply.</p>
+    ${table}</div>`);
+  const qi = $("#reg-q");
+  qi.oninput = () => { UI.regQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pRegister().then(() => { const n = $("#reg-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
+}
+
+async function pMailSettings() {
+  title("Mail settings");
+  const s = await api("/api/mail/settings");
+  UI.mailFiles = s.attachments;
+  const files = s.attachments.length ? `<table class="t"><thead><tr><th>File</th><th>Size</th><th>Kind</th><th></th></tr></thead><tbody>
+    ${s.attachments.map((f) => `<tr><td><a href="/api/mail/attachments/${encodeURIComponent(f.name)}">${esc(f.name)}</a></td><td class="small muted">${fmtSize(f.size)}</td>
+      <td class="small muted">${f.standard ? (f.replaced ? "Required, newer version uploaded" : "Required, comes with the template") : "Added by you"}</td>
+      <td style="text-align:right">${!f.standard || f.replaced ? `<button class="btn small" data-act="att-remove" data-n="${esc(f.name)}">${f.replaced ? "Use the original" : "Remove"}</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+    : empty("No attachments yet.");
+  const total = s.attachments.reduce((n, f) => n + f.size, 0);
+  setView(`<div class="box">${boxHead("Attachments", `<span class="small muted">${s.attachments.length} file(s), ${fmtSize(total)} in total</span>`)}
+      <p class="small muted" style="margin-top:0">These files are attached to every invitation mail. The required files come with the template; add more files here if needed. You can untick a file for a single mail on the candidate page. To update a required file, add a newer file with the same name.</p>
+      ${files}
+      <div class="actions" style="margin-top:12px"><label class="btn" for="att-input">Add files</label>
+        <input type="file" id="att-input" accept=".pdf,.xlsx,.xls,.docx,.doc" multiple hidden>
+        <span class="small muted">PDF, Excel or Word, up to 10 MB each.</span></div></div>
+    <div class="box">${boxHead("Mail template", `<span class="small muted">From: ${esc(s.sender)}</span>`)}
+      <div class="form-row"><label for="ms-subject">Subject</label><input type="text" id="ms-subject" value="${esc(s.subject)}"></div>
+      <div class="form-row"><label for="ms-body">Mail text</label><textarea id="ms-body" rows="26" style="font-family:inherit;font-size:13.5px">${esc(s.template)}</textarea>
+        <div class="help">{visit_date} is replaced with the visit date picked for each mail, for example ${esc(visitText(s.next_visit_day))}. A change here is used for new mails, not for mails already saved.</div></div>
+      <div class="actions"><button class="btn primary" data-act="ms-save">Save template</button><button class="btn" data-act="ms-reset">Back to the original</button></div></div>`);
+  const input = $("#att-input");
+  input.onchange = async () => {
+    const form = new FormData();
+    [...input.files].forEach((f) => form.append("files", f, f.name));
+    try {
+      const r = await api("/api/mail/attachments", { method: "POST", form });
+      const bad = r.results.filter((x) => !x.ok);
+      toast(bad.length ? bad.map((x) => `${x.file}: ${x.reason}`).join(" ") : `${r.results.length} file(s) added.`, !!bad.length);
+    } catch (e) { toast(e.message, true); }
+    lastHTML = ""; pMailSettings();
+  };
+}
+
 function letterBox(c) {
   const L = c.letter;
   const url = `/api/candidates/${encodeURIComponent(c.app_no)}/letter`;
@@ -715,6 +891,7 @@ const ACTS = {
     UI.files.forEach((f) => form.append("files", f, f.name));
     const email = $("#cv-email");
     if (email && !email.disabled && email.value.trim()) form.append("email", email.value.trim());
+    if (UI.cvSource.trim()) form.append("source", UI.cvSource.trim());
     b.disabled = true;
     try {
       const r = await api("/api/cvs", { method: "POST", form });
@@ -761,6 +938,48 @@ const ACTS = {
   "toggle-runs": () => { UI.showRuns = !UI.showRuns; lastHTML = ""; render(); },
   "edit-email": () => { UI.editEmail = true; lastHTML = ""; render().then(() => $("#email-input")?.focus()); },
   "cancel-email": () => { UI.editEmail = false; lastHTML = ""; render(); },
+  "inv-save": () => act(async () => {
+    const v = readInvite(current.arg);
+    await api(`/api/candidates/${encodeURIComponent(current.arg)}/mail`, { method: "POST", body: v });
+    UI.inviteEdit = null;
+  }, "Mail saved."),
+  "inv-preview": async () => {
+    const w = window.open("about:blank", "_blank");
+    try {
+      await api(`/api/candidates/${encodeURIComponent(current.arg)}/mail`, { method: "POST", body: readInvite(current.arg) });
+      UI.inviteEdit = null;
+      if (w) w.location = `/api/candidates/${encodeURIComponent(current.arg)}/mail/preview`;
+      lastHTML = ""; render();
+    } catch (e) { if (w) w.close(); toast(e.message, true); }
+  },
+  "inv-send": async () => {
+    const v = readInvite(current.arg);
+    const ok = await confirmBox({ heading: "Send this mail?", ok: "Send mail",
+      text: `To ${$("#invite .form-row div").textContent.trim()}, visit date ${visitText(v.visit_date) || "as written in the mail"}, with ${v.attachments.length} attachment(s).` });
+    if (!ok) return;
+    act(async () => {
+      const r = await api(`/api/candidates/${encodeURIComponent(current.arg)}/mail/send`, { method: "POST", body: v });
+      UI.inviteEdit = null;
+      return r;
+    }, (r) => (r.invite.how === "eml" ? "Mail ready. It was saved to the outbox (Outlook sending is not connected yet)." : "Mail sent."));
+  },
+  "reg-ref": (b) => { $("#reg-ref_no").value = b.dataset.ref; UI.regEdit = readRegister(current.arg); },
+  "reg-save": () => act(async () => {
+    const r = await api(`/api/candidates/${encodeURIComponent(current.arg)}/register`, { method: "POST", body: readRegister(current.arg) });
+    UI.regEdit = null; UI.refSuggestion = r.ref_suggestion;
+  }, "Register details saved."),
+  "reg-show": (b) => { UI.regShow = b.dataset.s; history.replaceState(null, "", "#/register"); current = { page: "register", arg: "" }; lastHTML = ""; pRegister(); },
+  "att-remove": async (b) => {
+    const original = b.textContent.trim() === "Use the original";
+    if (!(await confirmBox(original ? { heading: "Use the original file?", text: `Your uploaded version of ${b.dataset.n} is removed and the one that came with the template is used again.`, ok: "Use the original" }
+      : { heading: "Remove this attachment?", text: `${b.dataset.n} will no longer be attached to new mails.`, ok: "Remove", danger: true }))) return;
+    act(async () => { const r = await api(`/api/mail/attachments/${encodeURIComponent(b.dataset.n)}/remove`, { method: "POST" }); UI.mailFiles = r.attachments; }, "Attachment removed.");
+  },
+  "ms-save": () => act(() => api("/api/mail/settings", { method: "POST", body: { subject: $("#ms-subject").value, template: $("#ms-body").value } }), "Template saved. New mails use it."),
+  "ms-reset": async () => {
+    if (!(await confirmBox({ heading: "Go back to the original template?", text: "Your changes to the subject and the mail text will be removed.", ok: "Go back", danger: true }))) return;
+    act(() => api("/api/mail/settings", { method: "POST", body: { reset: true } }), "The original template is back.");
+  },
   "save-letter": () => act(async () => {
     await api(`/api/candidates/${encodeURIComponent(current.arg)}/letter`, { method: "POST", body: { start_date: $("#letter-start").value, end_date: $("#letter-end").value } });
     UI.letterDates = null;
@@ -826,8 +1045,9 @@ view.addEventListener("click", (e) => {
 const ROUTES = {
   hr: { dashboard: pDashboard, add: pAdd, pool: pAdd, vacancies: pVacancies, interns: pInterns, candidates: pCandidates, candidate: pCandidate, review: pReview, replies: pReplies, areas: pAreas, team: pTeam },
   interviewer: { interviews: pInterviews, interview: pInterview, team: pTeam, candidate: pCandidate },
+  mail: { add: pAdd, pool: pAdd, register: pRegister, mailsettings: pMailSettings, candidate: pCandidate },
 };
-const AUTO = new Set(["dashboard", "add", "pool", "vacancies", "interns", "candidates", "candidate", "review", "replies", "team", "interviews", "interview"]);
+const AUTO = new Set(["register", "dashboard", "add", "pool", "vacancies", "interns", "candidates", "candidate", "review", "replies", "team", "interviews", "interview"]);
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, "");
   const i = h.indexOf("/");
@@ -836,14 +1056,14 @@ function parseHash() {
 let rendering = false;
 async function render() {
   const { page, arg } = parseHash();
-  const fn = ROUTES[ROLE][page];
-  if (!fn) { location.replace(HOME[ROLE]); return; }
+  const fn = ROUTES[NK()][page];
+  if (!fn) { location.replace(HOME[NK()]); return; }
   if (page !== current.page || arg !== current.arg) { UI.showCv = false; UI.showRuns = false; UI.editDraft = null; UI.editEmail = false; lastHTML = ""; window.scrollTo(0, 0); }
   current = { page, arg };
   renderFrame();
   rendering = true;
   try { await fn(arg); }
-  catch (e) { setView(`<div class="box">${empty(e.message)}<a class="btn" href="${HOME[ROLE]}">Back to start</a></div>`); }
+  catch (e) { setView(`<div class="box">${empty(e.message)}<a class="btn" href="${HOME[NK()]}">Back to start</a></div>`); }
   finally { rendering = false; }
 }
 window.addEventListener("hashchange", render);
@@ -851,11 +1071,12 @@ window.addEventListener("hashchange", render);
 async function tick() {
   await refreshState();
   if (!rendering && AUTO.has(current.page) && !busy()) {
-    try { await ROUTES[ROLE][current.page]?.(current.arg); } catch { /* keep the page as it is */ }
+    try { await ROUTES[NK()][current.page]?.(current.arg); } catch { /* keep the page as it is */ }
   }
 }
 (async function start() {
   await refreshState();
+  if (MAILMODE()) ROLE = "hr";                         // mail-only mode has the HR officer's view only
   await render();
   setInterval(tick, 5000);
 })();

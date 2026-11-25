@@ -256,6 +256,7 @@ def r_add_to_pool(s: RecruiterState) -> RecruiterState:
 def r_save(s: RecruiterState) -> RecruiterState:
     fields: dict[str, Any] = {"status": s["status"]}
     if "profile" in s:
+        fields.update(university=tools.find_university(s["profile"].get("education") or []))
         fields.update(profile=s["profile"], profile_source=s.get("profile_source", ""),
                       name=s.get("name", ""), email=s.get("email", ""), email_source=s.get("email_source", ""),
                       area=s.get("area", ""), area_source=s.get("area_source", ""),

@@ -65,6 +65,7 @@ def build_message(
     msg["Message-ID"] = make_msgid(domain="hr-hiring.local")
     if unsent:
         msg["X-Unsent"] = "1"                     # Outlook opens it as a mail ready to send
+        msg["X-Uniform-Type-Identifier"] = "com.apple.mail-draft"
     msg.set_content(text or "")
     msg.add_alternative(html or "", subtype="html")
     for path in attachments:
@@ -132,8 +133,29 @@ def send_mail(
     sender_name, _ = parseaddr(_safe_header(sender))
     mode = cfg.get("mode", "eml")
 
-    if mode == "eml":
+    if mode in ("eml", "outlook_app"):
         fname, mid = _save_eml(sender, to_header, subject, html, text, attachments, name_hint)
+        if mode == "outlook_app":
+            try:
+                opened_in = outlook.open_eml_in_desktop_app(
+                    db.paths.outbox / fname,
+                    to_email=recipient_email,
+                    to_name=to_name.strip(),
+                    subject=_safe_header(subject),
+                    html=html,
+                    text=text,
+                    attachments=attachments,
+                )
+            except outlook.OutlookError as exc:
+                raise MailError(str(exc)) from exc
+            return {
+                "how": "outlook_app",
+                "file": fname,
+                "message_id": mid,
+                "sent_to": recipient_email,
+                "sender": sender,
+                "opened_in": opened_in,
+            }
         return {"how": "eml", "file": fname, "message_id": mid, "sent_to": recipient_email, "sender": sender}
 
     if mode in ("graph", "graph_send", "graph_draft"):

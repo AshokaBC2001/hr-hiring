@@ -361,3 +361,43 @@ def test_score_all_areas_matches_individual_score_cv(tmp_path):
         assert batched[area.name]["score"] == single_score
         assert batched[area.name]["parts"] == single_parts
         assert batched[area.name]["gaps"] == single_gaps
+
+
+def test_outlook_app_mode_release_open_and_test(app_client: TestClient):
+    headers_hr = {"x-role": "hr"}
+    opened: list[tuple[Path, dict]] = []
+
+    def fake_launcher(eml_path: Path, **kwargs) -> str:
+        opened.append((eml_path, kwargs))
+        return "Microsoft Outlook"
+
+    outlook.set_desktop_launcher(fake_launcher)
+
+    r = app_client.post("/api/outlook/settings", json={"mode": "outlook_app"}, headers=headers_hr)
+    assert r.status_code == 200 and r.json()["mode"] == "outlook_app"
+    assert app_client.get("/api/state").json()["outlook"]["mode"] == "outlook_app"
+
+    # Test Outlook button in settings modal triggers outlook_test.eml + launcher
+    tr = app_client.post("/api/outlook/test", json={"to": "supervisor@outlook.com"}, headers=headers_hr)
+    assert tr.status_code == 200, tr.text
+    assert tr.json()["delivery_status"] == "opened_app"
+    assert tr.json()["opened_in"] == "Microsoft Outlook"
+    assert len(opened) == 1 and opened[0][0].name == "outlook_test.eml"
+    parsed_test = email.message_from_bytes(opened[0][0].read_bytes(), policy=email.policy.default)
+    assert parsed_test["X-Unsent"] == "1"
+    assert parsed_test["X-Uniform-Type-Identifier"] == "com.apple.mail-draft"
+
+    # Full candidate flow -> Release Acceptance letter in outlook_app mode + one-click re-open
+    app_no = actions.add_cv("arjun_mehta.txt", (config.SAMPLES_DIR / "arjun_mehta.txt").read_bytes(), "")["app_no"]
+    flows.run_all_once()
+    actions.invite_from_pool(app_no, "AI/ML")
+    flows.run_all_once()
+    inv_id = [d["id"] for d in app_client.get("/api/drafts?state=waiting").json() if d["app_no"] == app_no][0]
+    rel = app_client.post(f"/api/drafts/{inv_id}/release", headers=headers_hr)
+    assert rel.status_code == 200
+    assert rel.json()["delivery_status"] == "opened_app"
+
+    reopen = app_client.post(f"/api/drafts/{inv_id}/open", headers=headers_hr)
+    assert reopen.status_code == 200
+    assert reopen.json()["ok"] is True and reopen.json()["opened_in"] == "Microsoft Outlook"
+    assert len(opened) == 3

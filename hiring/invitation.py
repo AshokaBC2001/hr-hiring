@@ -252,13 +252,16 @@ def send(app_no: str) -> dict:
         sent_to=result.get("sent_to", c.email),
         message_id=result.get("message_id", ""),
         web_link=result.get("web_link", ""),
+        opened_in=result.get("opened_in", ""),
     )
     reg = dict(c.register or {})
     reg["mail_date"] = date.today().isoformat()
     if reg.get("status", "Not mailed") == "Not mailed":
         reg["status"] = "Mail sent"
     db.update_candidate(c.id, invite=sent, register=reg)
-    if how_code == "eml":
+    if how_code == "outlook_app":
+        how_text = f"opened in {sent['opened_in'] or 'Outlook / Mail app'} ready to send ({sent['file']})"
+    elif how_code == "eml":
         how_text = "saved to the outbox as " + sent["file"]
     elif how_code == "graph_draft":
         how_text = f"saved to Outlook Drafts ({sent['sent_to']})"
@@ -271,6 +274,35 @@ def send(app_no: str) -> dict:
     db.log_event(c.id, "HR officer", f"Invitation mail {how_text} (visit {d.get('visit_date') or 'date in the text'}, "
                                      f"{len(paths)} attachment(s)).")
     return sent
+
+
+def open_sent_eml(app_no: str) -> dict:
+    """Re-open an archived invitation .eml in Outlook Desktop or Mail app."""
+    c = db.get_candidate(app_no)
+    if c is None:
+        raise MailProblem("Candidate not found.")
+    inv = c.invite or {}
+    fname = inv.get("file") or ""
+    if not fname:
+        raise MailProblem("No .eml archive exists for this invitation yet.")
+    path = (db.paths.outbox / fname).resolve()
+    if path.parent != db.paths.outbox.resolve() or not path.is_file():
+        raise MailProblem("Saved .eml file could not be found.")
+    paths = [attachment_path(n) for n in inv.get("attachments", []) if attachment_path(n).is_file()]
+    body = inv.get("body", "")
+    try:
+        opened_in = outlook.open_eml_in_desktop_app(
+            path,
+            to_email=inv.get("sent_to") or c.email or "",
+            to_name=c.name or "",
+            subject=inv.get("subject", ""),
+            html=to_html(body) if body else "",
+            text=body,
+            attachments=paths,
+        )
+    except outlook.OutlookError as exc:
+        raise MailProblem(str(exc)) from exc
+    return {"ok": True, "opened_in": opened_in, "file": fname}
 
 
 def send_test_invite(to_email: str) -> dict:

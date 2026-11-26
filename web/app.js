@@ -138,7 +138,9 @@ function renderFrame() {
   const working = Object.values(STATE.team).find((x) => x.state === "working");
   const ol = STATE.outlook || {};
   const acct = ol.account?.username || "";
-  const olText = ol.mode === "graph_draft"
+  const olText = ol.mode === "outlook_app"
+    ? "Outlook Desktop / Mail app (no login needed)"
+    : ol.mode === "graph_draft"
     ? `Outlook: Graph Drafts (${acct || "sign in required"})`
     : ol.mode === "graph" || ol.mode === "graph_send"
     ? `Outlook: Graph Send (${acct || "sign in required"})`
@@ -184,10 +186,14 @@ function mailBlock(d, { showCandidate = false } = {}) {
   const ol = STATE?.outlook || {};
   const state = d.status === "waiting" ? tag("Waiting for release", ROLE === "hr" ? "need" : "") : d.status === "released" ? tag("Released") : tag(d.status);
   const deliveryBadge = d.delivery_status === "sent" ? tag("Sent via Outlook", "pass")
+    : d.delivery_status === "opened_app" ? tag("Opened in Outlook / Mail", "pass")
     : d.delivery_status === "outlook_draft" || (d.status === "waiting" && d.outlook_web_link) ? tag("Outlook Draft", "pass")
     : d.delivery_status === "failed" ? tag("Outlook Failed", "fail")
     : "";
   const notes = (d.check_notes || []).map((n) => `<div class="warn">Warning: ${esc(n)}</div>`).join("");
+  const desktopOpenBtn = ROLE === "hr" && d.email
+    ? `<button class="btn small" data-act="open-draft-app" data-id="${d.id}" title="Open ready-to-send email in Microsoft Outlook / Mail app">Open in Outlook App</button>`
+    : "";
   const emlBtn = `<a class="btn small" href="${esc(d.eml_url || `/api/drafts/${d.id}/eml`)}" title="Download .eml draft (with PDF attachment if acceptance) for Outlook Desktop">.eml</a>`;
   const webBtn = d.compose_links?.outlook_office
     ? `<a class="btn small" href="${esc(d.compose_links.outlook_office)}" target="_blank" rel="noopener" title="Open pre-filled draft in Microsoft 365 Outlook Web">Outlook Web</a>`
@@ -203,17 +209,18 @@ function mailBlock(d, { showCandidate = false } = {}) {
     foot = editing
       ? `<div class="actions"><button class="btn primary" data-act="save-draft" data-id="${d.id}">Save changes</button><button class="btn" data-act="cancel-edit">Cancel</button></div>`
       : `<div class="actions"><button class="btn primary" data-act="release" data-id="${d.id}" data-name="${esc(d.name)}" data-kind="${esc(d.kind_label)}" ${d.can_release ? "" : "disabled"}>Release</button>
-         <button class="btn" data-act="edit-draft" data-id="${d.id}">Edit</button>${graphDraftBtn}${openBtn}${webBtn}${emlBtn}
+         <button class="btn" data-act="edit-draft" data-id="${d.id}">Edit</button>${desktopOpenBtn}${graphDraftBtn}${openBtn}${webBtn}${emlBtn}
          ${d.can_release ? "" : `<span class="small muted">${esc(d.release_blocker || "The candidate is not at this step now.")}</span>`}</div>`;
   } else if (d.status === "released") {
     let info = `Released ${esc(fmtTime(d.released_at))}. Outbox: ${esc(d.file)}.`;
     if (d.delivery_status === "sent") info = `Sent via Outlook to ${esc(d.sent_to)} (${esc(fmtTime(d.sent_at || d.released_at))}). Archived: ${esc(d.file)}.`;
+    else if (d.delivery_status === "opened_app") info = `Opened in Outlook / Mail ready to send to ${esc(d.sent_to)}. Archived: ${esc(d.file)}.`;
     else if (d.delivery_status === "outlook_draft") info = `Saved to Outlook Drafts for ${esc(d.sent_to)}. Archived: ${esc(d.file)}.`;
     else if (d.delivery_status === "failed") info = `Saved to outbox, Outlook error: ${esc(d.delivery_error || "failed")}`;
-    const retryBtn = ROLE === "hr" && d.email && d.delivery_status !== "sent" && ol.mode !== "eml"
+    const retryBtn = ROLE === "hr" && d.email && d.delivery_status !== "sent" && ol.mode !== "eml" && ol.mode !== "outlook_app"
       ? `<button class="btn small" data-act="resend-draft" data-id="${d.id}">${d.delivery_status === "failed" ? "Retry Outlook" : "Send via Outlook"}</button>`
       : "";
-    foot = `<div class="actions"><span class="small muted" style="flex:1">${info}</span>${retryBtn}${graphDraftBtn}${openBtn}${webBtn}${emlBtn}</div>`;
+    foot = `<div class="actions"><span class="small muted" style="flex:1">${info}</span>${desktopOpenBtn}${retryBtn}${graphDraftBtn}${openBtn}${webBtn}${emlBtn}</div>`;
   }
   const attach = d.attachment ? `<div class="mail-attach small">Attachment: <a href="/api/candidates/${encodeURIComponent(d.app_no)}/letter" target="_blank" rel="noopener">${esc(d.attachment)}</a> <span class="muted">(placement letter, made by code)</span></div>` : "";
   const body = editing
@@ -234,7 +241,12 @@ function _stopAuthPoll() {
 function _outlookControlsMarkup(c, prefix = "ol") {
   const acct = c.account;
   const a = c.auth || {};
-  const showSmtp = c.mode === "smtp" || c.smtp_fallback !== false;
+  const isGraph = c.mode === "graph" || c.mode === "graph_send" || c.mode === "graph_draft";
+  const showSmtp = c.mode === "smtp" || ((c.mode === "graph" || c.mode === "graph_send") && c.smtp_fallback !== false);
+  const showEasy = c.mode === "outlook_app" || c.mode === "eml";
+  const easyMsg = c.mode === "eml"
+    ? "Saves a ready-to-send .eml draft file with all attachments into data/outbox/."
+    : "No password, login, or Client ID needed. Clicking Send mail opens the prepared email (with all attachments) inside Outlook Desktop or Apple Mail &mdash; just click Send.";
   const authBlock = acct
     ? `<div class="notice ok" style="padding:8px 10px"><div class="grow small"><b>Signed in sender:</b> ${esc(acct.name)} (${esc(acct.username)})</div><button type="button" class="btn small" data-dlg="ol-signout">Sign out</button></div>`
     : a.status === "pending" && a.user_code
@@ -244,13 +256,17 @@ function _outlookControlsMarkup(c, prefix = "ol") {
     <div class="form-row">
       <label for="${prefix}-mode">Delivery mode</label>
       <select id="${prefix}-mode">
-        <option value="eml" ${c.mode === "eml" ? "selected" : ""}>Outlook Draft files (.eml) &amp; Outlook Web links (no setup)</option>
+        <option value="outlook_app" ${c.mode === "outlook_app" ? "selected" : ""}>Open in Outlook Desktop / Mail app (Recommended &mdash; no login or setup)</option>
+        <option value="eml" ${c.mode === "eml" ? "selected" : ""}>Save Draft file (.eml) &amp; Outlook Web links (no setup)</option>
         <option value="graph" ${c.mode === "graph" || c.mode === "graph_send" ? "selected" : ""}>Send via Outlook (Microsoft Graph + Upload Session for &gt;3 MB)</option>
         <option value="graph_draft" ${c.mode === "graph_draft" ? "selected" : ""}>Save directly to Outlook Drafts (Microsoft Graph + MSAL)</option>
         <option value="smtp" ${c.mode === "smtp" ? "selected" : ""}>Office 365 / Outlook SMTP (smtp.office365.com)</option>
       </select>
     </div>
-    <div style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px">
+    <div id="${prefix}-easy-sec" class="notice ok" style="margin-top:10px;padding:8px 10px;${showEasy ? "" : "display:none"}">
+      <div class="grow small" id="${prefix}-easy-msg">${easyMsg}</div>
+    </div>
+    <div id="${prefix}-graph-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${isGraph ? "" : "display:none"}">
       <div class="label" style="margin-bottom:6px">Microsoft 365 / Outlook Graph (MSAL OAuth2)</div>
       <div class="grid two">
         <div class="form-row" style="margin:0"><label for="${prefix}-client">Application (Client) ID</label><input type="text" id="${prefix}-client" value="${esc(c.client_id)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
@@ -283,6 +299,24 @@ function _outlookControlsMarkup(c, prefix = "ol") {
       <input type="email" id="${prefix}-test-to" value="${esc(c.test_recipient)}" placeholder="Leave blank to send to candidate email">
       <div class="help">If set, all outgoing emails redirect to this inbox (useful for testing with a test inbox).</div>
     </div>`;
+}
+
+function _syncOutlookModeUI(prefix = "ol") {
+  const mode = $(`#${prefix}-mode`)?.value || "outlook_app";
+  const isGraph = mode === "graph" || mode === "graph_send" || mode === "graph_draft";
+  const isEasy = mode === "outlook_app" || mode === "eml";
+  const fb = !!$(`#${prefix}-sfallback`)?.checked;
+  const showSmtp = mode === "smtp" || ((mode === "graph" || mode === "graph_send") && fb);
+  const easySec = $(`#${prefix}-easy-sec`), graphSec = $(`#${prefix}-graph-sec`), smtpSec = $(`#${prefix}-smtp-sec`);
+  if (easySec) easySec.style.display = isEasy ? "" : "none";
+  const easyMsg = $(`#${prefix}-easy-msg`);
+  if (easyMsg) {
+    easyMsg.textContent = mode === "eml"
+      ? "Saves a ready-to-send .eml draft file with all attachments into data/outbox/."
+      : "No password, login, or Client ID needed. Clicking Send mail opens the prepared email (with all attachments) inside Outlook Desktop or Apple Mail — just click Send.";
+  }
+  if (graphSec) graphSec.style.display = isGraph ? "" : "none";
+  if (smtpSec) smtpSec.style.display = showSmtp ? "" : "none";
 }
 
 function _collectOutlookPayload(prefix = "ol") {
@@ -342,13 +376,8 @@ async function openOutlookSettings() {
         </div>
         <div class="actions"><button type="button" class="btn" data-dlg="cancel">Cancel</button><button type="button" class="btn primary" data-dlg="save">Save settings</button></div>`;
 
-      $("#ol-mode").onchange = (e) => {
-        const show = e.target.value === "smtp" || $("#ol-sfallback").checked;
-        $("#ol-smtp-sec").style.display = show ? "" : "none";
-      };
-      $("#ol-sfallback").onchange = (e) => {
-        $("#ol-smtp-sec").style.display = ($("#ol-mode").value === "smtp" || e.target.checked) ? "" : "none";
-      };
+      $("#ol-mode").onchange = () => _syncOutlookModeUI("ol");
+      $("#ol-sfallback").onchange = () => _syncOutlookModeUI("ol");
 
       const bodyEl = $("#dialog-body");
       bodyEl.querySelector('[data-dlg="cancel"]').onclick = () => { _stopAuthPoll(); closeDialog(); };
@@ -362,7 +391,10 @@ async function openOutlookSettings() {
         try {
           await api("/api/outlook/settings", { method: "POST", body: _collectOutlookPayload("ol") });
           const r = await api("/api/outlook/test", { method: "POST", body: { to: $("#ol-probe").value } });
-          toast(r.delivery_status === "outlook_draft" ? `Test draft saved in Outlook for ${r.sent_to}.` : `Test email sent via Outlook to ${r.sent_to}.`);
+          toast(r.delivery_status === "opened_app"
+            ? `Opened in ${r.opened_in || "Outlook / Mail"} for ${r.sent_to} — just click Send.`
+            : r.delivery_status === "outlook_draft" ? `Test draft saved in Outlook for ${r.sent_to}.`
+            : `Test email sent via Outlook to ${r.sent_to}.`);
         } catch (e) { toast(e.message, true); }
       };
 
@@ -783,18 +815,20 @@ function inviteBox(c) {
   if (sent) {
     const how = c.invite.how || "eml";
     let sentInfo = "";
-    if (how === "graph") sentInfo = ` Sent via Outlook Graph${c.invite.sender ? " from " + esc(c.invite.sender) : ""} to ${esc(c.invite.sent_to || c.email)}.`;
+    if (how === "outlook_app") sentInfo = ` Opened in ${esc(c.invite.opened_in || "Outlook / Mail")} for ${esc(c.invite.sent_to || c.email)}.`;
+    else if (how === "graph") sentInfo = ` Sent via Outlook Graph${c.invite.sender ? " from " + esc(c.invite.sender) : ""} to ${esc(c.invite.sent_to || c.email)}.`;
     else if (how === "graph_draft") sentInfo = ` Saved to Outlook Drafts for ${esc(c.invite.sent_to || c.email)}.`;
     else if (how === "smtp") sentInfo = ` Sent via Office 365 SMTP (${esc(c.invite.sender || "SMTP")}) to ${esc(c.invite.sent_to || c.email)}.`;
     if (c.invite.file) sentInfo += ` Saved to data/outbox/${esc(c.invite.file)}.`;
     const emlLink = c.invite.file ? `<a class="btn" href="/api/candidates/${encodeURIComponent(c.app_no)}/mail/eml">Download .eml</a>` : "";
+    const reopenBtn = c.invite.file ? `<button class="btn" data-act="inv-open">Open in Outlook / Mail app</button>` : "";
     const outlookLink = c.invite.web_link ? `<a class="btn" href="${esc(c.invite.web_link)}" target="_blank" rel="noopener">Open in Outlook</a>` : "";
     return `<div class="box" id="invite">${boxHead("Invitation mail", tag("Mail sent", "pass"))}
       <div class="field"><div class="label">To</div><div>${esc(c.name)} &lt;${esc(c.invite.sent_to || c.email)}&gt;</div></div>
       <div class="field"><div class="label">Subject</div><div>${esc(c.invite.subject)}</div></div>
       <div class="field"><div class="label">Sent</div><div>${esc(fmtTime(c.invite.sent_at))}<span class="small muted">${sentInfo}</span></div></div>
       <div class="field"><div class="label">Attachments</div><div>${c.invite.attachments.length ? esc(c.invite.attachments.join(", ")) : `<span class="muted">No attachments</span>`}</div></div>
-      <div class="actions"><a class="btn" href="${url}" target="_blank" rel="noopener">View the mail</a>${outlookLink}${emlLink}</div></div>`;
+      <div class="actions"><a class="btn" href="${url}" target="_blank" rel="noopener">View the mail</a>${reopenBtn}${outlookLink}${emlLink}</div></div>`;
   }
   const noEmail = !c.email ? notice("need", "No email address yet.", "Add it in the Profile box before sending.") : "";
   return `<div class="box" id="invite">${boxHead("Invitation mail", tag(c.invite.status === "draft" ? "Saved, not sent" : "Not sent yet", "need"))}
@@ -896,7 +930,11 @@ async function pMailSettings() {
       <td style="text-align:right">${!f.standard || f.replaced ? `<button class="btn small" data-act="att-remove" data-n="${esc(f.name)}">${f.replaced ? "Use the original" : "Remove"}</button>` : ""}</td></tr>`).join("")}</tbody></table>`
     : empty("No attachments yet.");
   const total = s.attachments.reduce((n, f) => n + f.size, 0);
-  const acctText = ol.account?.username ? `Signed in: ${esc(ol.account.username)}` : ol.mode === "eml" ? ".eml & Outlook Web mode" : "Not signed in";
+  const acctText = ol.mode === "outlook_app"
+    ? "Easy mode: opens Outlook Desktop / Mail (no login needed)"
+    : ol.account?.username ? `Signed in: ${esc(ol.account.username)}`
+    : ol.mode === "eml" ? ".eml & Outlook Web mode"
+    : "Not signed in";
   setView(`<div class="box">${boxHead("Attachments", `<span class="small muted">${s.attachments.length} file(s), ${fmtSize(total)} in total</span>`)}
       <p class="small muted" style="margin-top:0">These files are attached to every invitation mail. The required files come with the template; add more files here if needed. You can untick a file for a single mail on the candidate page. To update a required file, add a newer file with the same name.</p>
       ${files}
@@ -904,7 +942,7 @@ async function pMailSettings() {
         <input type="file" id="att-input" accept=".pdf,.xlsx,.xls,.docx,.doc" multiple hidden>
         <span class="small muted">PDF, Excel or Word, up to 10 MB each.</span></div></div>
     <div class="box" id="outlook-box">${boxHead("Outlook sending", `<span class="small muted">${acctText}</span>`)}
-      <p class="small muted" style="margin-top:0">With ${fmtSize(total)} of attachments, Microsoft Graph creates a draft, uploads each file (using an upload session for files &ge; 3 MB), and sends. You can also use Office 365 SMTP as a fallback or keep .eml mode.</p>
+      <p class="small muted" style="margin-top:0">By default, clicking Send opens the email (with all ${s.attachments.length} attachments, ${fmtSize(total)} total) inside Outlook Desktop or Apple Mail &mdash; just click Send. Advanced options also support Microsoft Graph (upload session for &ge; 3 MB) and Office 365 SMTP.</p>
       ${_outlookControlsMarkup(ol, "ms-ol")}
       <div class="form-row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft)">
         <label for="ms-ol-probe">Test real send (with all ${s.attachments.length} attachments)</label>
@@ -932,12 +970,8 @@ async function pMailSettings() {
     lastHTML = ""; pMailSettings();
   };
   const olBox = $("#outlook-box");
-  $("#ms-ol-mode").onchange = (e) => {
-    $("#ms-ol-smtp-sec").style.display = (e.target.value === "smtp" || $("#ms-ol-sfallback").checked) ? "" : "none";
-  };
-  $("#ms-ol-sfallback").onchange = (e) => {
-    $("#ms-ol-smtp-sec").style.display = ($("#ms-ol-mode").value === "smtp" || e.target.checked) ? "" : "none";
-  };
+  $("#ms-ol-mode").onchange = () => _syncOutlookModeUI("ms-ol");
+  $("#ms-ol-sfallback").onchange = () => _syncOutlookModeUI("ms-ol");
   $("#ms-ol-save").onclick = async () => {
     try {
       await api("/api/outlook/settings", { method: "POST", body: _collectOutlookPayload("ms-ol") });
@@ -948,7 +982,8 @@ async function pMailSettings() {
     try {
       await api("/api/outlook/settings", { method: "POST", body: _collectOutlookPayload("ms-ol") });
       const r = await api("/api/mail/test", { method: "POST", body: { to: $("#ms-ol-probe").value } });
-      toast(r.how === "eml" ? `Test .eml saved to data/outbox/${r.file} (${r.attachments.length} attachments).`
+      toast(r.how === "outlook_app" ? `Opened in ${r.opened_in || "Outlook / Mail"} for ${r.sent_to} (${r.attachments.length} attachments) — just click Send.`
+        : r.how === "eml" ? `Test .eml saved to data/outbox/${r.file} (${r.attachments.length} attachments).`
         : r.how === "graph_draft" ? `Test draft saved in Outlook for ${r.sent_to} (${r.attachments.length} attachments).`
         : `Test mail sent via ${r.how.toUpperCase()} to ${r.sent_to} (${r.attachments.length} attachments).`);
       lastHTML = ""; await refreshState(); pMailSettings();
@@ -1242,12 +1277,20 @@ const ACTS = {
       return r;
     }, (r) => {
       const how = r.invite.how;
+      if (how === "outlook_app") return `Opened in ${r.invite.opened_in || "Outlook / Mail"} for ${r.invite.sent_to || "candidate"} — click Send.`;
       if (how === "graph") return `Mail sent via Outlook Graph to ${r.invite.sent_to || "candidate"}.`;
       if (how === "graph_draft") return `Saved to Outlook Drafts for ${r.invite.sent_to || "candidate"}.`;
       if (how === "smtp") return `Mail sent via Office 365 SMTP to ${r.invite.sent_to || "candidate"}.`;
       return "Mail ready. It was saved to the outbox (.eml).";
     });
   },
+  "inv-open": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/mail/open`, { method: "POST" }),
+    (r) => `Opened in ${r.opened_in || "Outlook / Mail"} — click Send.`),
+  "open-draft-app": (b) => act(async () => {
+    const r = await api(`/api/drafts/${b.dataset.id}/open`, { method: "POST" });
+    if (!r.ok) throw new Error(r.error || "Could not open Outlook / Mail.");
+    return r;
+  }, (r) => `Opened in ${r.opened_in || "Outlook / Mail"} — click Send.`),
   "outlook-settings": () => openOutlookSettings(),
   "outlook-draft": (b) => act(async () => {
     const r = await api(`/api/drafts/${b.dataset.id}/outlook-draft`, { method: "POST" });
@@ -1258,7 +1301,8 @@ const ACTS = {
     const r = await api(`/api/drafts/${b.dataset.id}/resend`, { method: "POST" });
     if (!r.ok) throw new Error(r.error || "Outlook delivery failed.");
     return r;
-  }, (r) => r.delivery_status === "outlook_draft" ? `Saved Outlook draft for ${r.sent_to}.` : `Sent via Outlook to ${r.sent_to}.`),
+  }, (r) => r.delivery_status === "opened_app" ? `Opened in ${r.opened_in || "Outlook / Mail"} — click Send.`
+    : r.delivery_status === "outlook_draft" ? `Saved Outlook draft for ${r.sent_to}.` : `Sent via Outlook to ${r.sent_to}.`),
   "reg-ref": (b) => { $("#reg-ref_no").value = b.dataset.ref; UI.regEdit = readRegister(current.arg); },
   "reg-save": () => act(async () => {
     const r = await api(`/api/candidates/${encodeURIComponent(current.arg)}/register`, { method: "POST", body: readRegister(current.arg) });
@@ -1309,7 +1353,9 @@ const ACTS = {
   },
   "release": async (b) => {
     const ol = STATE?.outlook || {};
-    const info = ol.mode === "graph_draft"
+    const info = ol.mode === "outlook_app"
+      ? `Email will open ready to send in Outlook Desktop / Mail (and archive to data/outbox/).`
+      : ol.mode === "graph_draft"
       ? `Email will be archived to data/outbox/ AND saved directly into your Outlook Drafts folder.`
       : (ol.mode === "graph" || ol.mode === "graph_send")
       ? (ol.test_recipient ? `Email will be archived and sent via Outlook to demo override (${ol.test_recipient}).` : `Email will be archived and sent directly from your Outlook account to ${b.dataset.name}.`)
@@ -1318,7 +1364,8 @@ const ACTS = {
       : `The .eml draft (with PDF attached if acceptance) is saved to data/outbox/ for Outlook Desktop.`;
     if (!(await confirmBox({ heading: `Release the ${b.dataset.kind}?`, text: `To ${b.dataset.name}. ${info}`, ok: "Release" }))) return;
     act(() => api(`/api/drafts/${b.dataset.id}/release`, { method: "POST" }),
-      (r) => r.delivery_status === "sent" ? `Released and sent via Outlook to ${r.sent_to}.`
+      (r) => r.delivery_status === "opened_app" ? `Released and opened in Outlook / Mail for ${r.sent_to}.`
+        : r.delivery_status === "sent" ? `Released and sent via Outlook to ${r.sent_to}.`
         : r.delivery_status === "outlook_draft" ? `Released and saved to Outlook Drafts (${r.sent_to}).`
         : r.delivery_status === "failed" ? `Released to outbox (Outlook failed: ${r.delivery_error}).`
         : "Released.");

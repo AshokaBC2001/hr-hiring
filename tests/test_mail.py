@@ -393,3 +393,52 @@ def test_mail_test_endpoint_eml_download_and_university_faculty_edge_case(mail):
     assert eml.status_code == 200 and eml.headers["content-type"].startswith("message/rfc822")
     assert eml.content[:40]
 
+
+def test_outlook_app_mode_in_mail_only_and_open_route(mail, monkeypatch):
+    from hiring import outlook
+
+    monkeypatch.setattr(config, "OUTLOOK_MODE", "outlook_app")
+    launched: list[tuple[Path, dict]] = []
+
+    def fake_launcher(eml_path: Path, **kwargs) -> str:
+        launched.append((eml_path, kwargs))
+        return "Apple Mail"
+
+    outlook.set_desktop_launcher(fake_launcher)
+    assert outlook.raw_settings()["mode"] == "outlook_app"
+
+    # Test mail with all 4 attachments opens via desktop launcher
+    r = mail.post("/api/mail/test", headers=HR, json={"to": "supervisor@outlook.com"})
+    assert r.status_code == 200, r.text
+    res = r.json()
+    assert res["how"] == "outlook_app" and res["opened_in"] == "Apple Mail"
+    assert sorted(res["attachments"]) == sorted(REQUIRED)
+    assert len(launched) == 1 and launched[0][0].is_file()
+    parsed = email.message_from_bytes(launched[0][0].read_bytes(), policy=email.policy.default)
+    assert parsed["X-Unsent"] == "1"
+    assert parsed["X-Uniform-Type-Identifier"] == "com.apple.mail-draft"
+
+    # Send to candidate & re-open via /api/candidates/{app_no}/mail/open
+    no = add("arjun_mehta.txt", "Mr.Dinesh")
+    read_all()
+    sent = mail.post(f"/api/candidates/{no}/mail/send", headers=HR, json={})
+    assert sent.status_code == 200, sent.text
+    inv = sent.json()["invite"]
+    assert inv["how"] == "outlook_app" and inv["opened_in"] == "Apple Mail" and inv["status"] == "sent"
+    assert len(launched) == 2 and sorted(p.name for p in launched[1][1]["attachments"]) == sorted(REQUIRED)
+
+    reopen = mail.post(f"/api/candidates/{no}/mail/open", headers=HR)
+    assert reopen.status_code == 200, reopen.text
+    assert reopen.json()["opened_in"] == "Apple Mail" and len(launched) == 3
+
+    # Failing launcher surfaces clean MailProblem (HTTP 400) without marking candidate sent
+    def broken_launcher(*args, **kwargs):
+        raise outlook.OutlookError("No desktop mail app installed")
+
+    outlook.set_desktop_launcher(broken_launcher)
+    no2 = add("rahul_nair.txt")
+    read_all()
+    fail = mail.post(f"/api/candidates/{no2}/mail/send", headers=HR, json={})
+    assert fail.status_code == 400 and "No desktop mail app" in fail.json()["detail"]
+    assert (db.get_candidate(no2).invite or {}).get("status") != "sent"
+

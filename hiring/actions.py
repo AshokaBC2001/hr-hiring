@@ -438,15 +438,18 @@ def release_draft(draft_id: int) -> str:
             raise ActionError(f"{c.app_no} is \"{config.STATUSES[c.status][0]}\", so this email cannot be released now.")
         fname = re.sub(r"[^A-Za-z0-9_-]", "", f"{c.app_no}_{d.kind}_{d.id}") + ".eml"
         attach = (letters.file_name(c), letters.read(c)) if d.kind == "acceptance" else None
-        (db.paths.outbox / fname).write_bytes(
-            letters.email_file(c, d.subject, d.body, attach=(d.kind == "acceptance"))
+        eml_path = db.paths.outbox / fname
+        eml_path.write_bytes(letters.email_file(c, d.subject, d.body, attach=(d.kind == "acceptance")))
+        att_paths = [db.paths.letters / letters.file_name(c)] if attach is not None else None
+        res = outlook.deliver_draft(
+            c.email, c.name or "", d.subject, d.body,
+            attachment=attach, eml_path=eml_path, attachment_paths=att_paths,
         )
-        res = outlook.deliver_draft(c.email, c.name or "", d.subject, d.body, attachment=attach)
         d.status, d.released_at, d.file = "released", db.now(), fname
         d.delivery_status = res["delivery_status"]
         d.delivery_error = res.get("error", "")
         d.sent_to = res.get("sent_to", "")
-        d.sent_at = db.now() if res["ok"] and res["delivery_status"] in ("sent", "outlook_draft") else ""
+        d.sent_at = db.now() if res["ok"] and res["delivery_status"] in ("sent", "outlook_draft", "opened_app") else ""
         if res.get("message_id"):
             d.outlook_message_id = res["message_id"]
         if res.get("web_link"):
@@ -463,6 +466,8 @@ def release_draft(draft_id: int) -> str:
         note = f"Released the {label}{extra}. Sent via Outlook to {res['sent_to']} and saved to the outbox."
     elif delivery_status == "outlook_draft":
         note = f"Released the {label}{extra}. Saved as an Outlook Draft for {res['sent_to']} and saved to the outbox."
+    elif delivery_status == "opened_app":
+        note = f"Released the {label}{extra}. Opened in {res.get('opened_in') or 'Outlook / Mail'} ready to send and saved to the outbox."
     elif delivery_status == "failed":
         note = f"Released the {label}{extra} to the outbox (Outlook delivery failed: {res.get('error', '')[:160]})."
     else:
@@ -490,6 +495,40 @@ def export_draft_eml(draft_id: int) -> tuple[str, bytes]:
         letters.read(c)
     raw = letters.email_file(c, d.subject, d.body, attach=attach)
     return fname, raw
+
+
+def open_draft_in_app(draft_id: int) -> dict:
+    """Save an .eml copy of a draft and open it in Outlook Desktop / Mail app."""
+    with db.Session() as s:
+        d = s.get(db.Draft, draft_id)
+        if d is None:
+            raise ActionError("Draft not found.")
+        c = s.get(db.Candidate, d.candidate_id)
+        if c is None:
+            raise ActionError("Candidate not found.")
+        if not c.email or not checks.EMAIL_RE.fullmatch(c.email):
+            raise ActionError("Add the candidate's email address on the candidate page before opening in Outlook.")
+        fname = d.file or (re.sub(r"[^A-Za-z0-9_-]", "", f"{c.app_no}_{d.kind}_{d.id}") + ".eml")
+        attach = d.kind == "acceptance" and bool(c.work_id)
+        att_paths = [db.paths.letters / letters.file_name(c)] if attach else []
+        if attach:
+            letters.read(c)
+        eml_path = db.paths.outbox / fname
+        if not eml_path.is_file():
+            eml_path.write_bytes(letters.email_file(c, d.subject, d.body, attach=attach))
+        subject, body, to_email, to_name = d.subject, d.body, c.email, c.name or ""
+    try:
+        opened_in = outlook.open_eml_in_desktop_app(
+            eml_path,
+            to_email=to_email,
+            to_name=to_name,
+            subject=subject,
+            text=body,
+            attachments=att_paths,
+        )
+    except outlook.OutlookError as exc:
+        raise ActionError(str(exc)) from exc
+    return {"ok": True, "opened_in": opened_in, "file": fname}
 
 
 def push_draft_to_outlook(draft_id: int) -> dict:
@@ -529,7 +568,7 @@ def push_draft_to_outlook(draft_id: int) -> dict:
 
 
 def resend_draft(draft_id: int) -> dict:
-    """Send or re-send a released email via active Microsoft Outlook Graph or SMTP settings."""
+    """Send or re-send a released email via active Microsoft Outlook Graph, Desktop app, or SMTP."""
     with db.Session() as s:
         d = s.get(db.Draft, draft_id)
         if d is None or d.status != "released":
@@ -538,11 +577,20 @@ def resend_draft(draft_id: int) -> dict:
         if c is None or not c.email or not checks.EMAIL_RE.fullmatch(c.email):
             raise ActionError("Add the candidate's valid email address before sending.")
         subject, body, kind, cid = d.subject, d.body, d.kind, c.id
+        fname = d.file or (re.sub(r"[^A-Za-z0-9_-]", "", f"{c.app_no}_{d.kind}_{d.id}") + ".eml")
+        attach_bool = kind == "acceptance" and bool(c.work_id)
+        attach = (letters.file_name(c), letters.read(c)) if attach_bool else None
+        att_paths = [db.paths.letters / letters.file_name(c)] if attach_bool else None
+        eml_path = db.paths.outbox / fname
+        if not eml_path.is_file():
+            eml_path.write_bytes(letters.email_file(c, subject, body, attach=attach_bool))
     cfg = outlook.raw_settings()
     if cfg["mode"] == "eml":
-        raise ActionError("Outlook mode is set to '.eml file only'. Choose Graph Send, Graph Drafts, or Office 365 SMTP in Outlook settings first.")
-    attach = (letters.file_name(c), letters.read(c)) if (kind == "acceptance" and c.work_id) else None
-    res = outlook.deliver_draft(c.email, c.name or "", subject, body, attachment=attach, cfg=cfg)
+        raise ActionError("Outlook mode is set to '.eml file only'. Choose Open in Outlook App, Graph Send, Graph Drafts, or Office 365 SMTP in Outlook settings first.")
+    res = outlook.deliver_draft(
+        c.email, c.name or "", subject, body,
+        attachment=attach, eml_path=eml_path, attachment_paths=att_paths, cfg=cfg,
+    )
     with db.Session() as s:
         d = s.get(db.Draft, draft_id)
         if d is not None:

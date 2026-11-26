@@ -406,6 +406,12 @@ def download_invite_eml(app_no: str):
     return FileResponse(path, media_type="message/rfc822", filename=path.name)
 
 
+@app.post("/api/candidates/{app_no}/mail/open")
+def open_invite_eml(app_no: str, request: Request):
+    _need_role(request, "hr")
+    return invitation.open_sent_eml(app_no)
+
+
 @app.get("/api/candidates/{app_no}/mail/preview", response_class=HTMLResponse)
 def preview_invite(app_no: str):
     """The mail as the student will see it."""
@@ -838,6 +844,12 @@ def download_draft_eml(draft_id: int):
         media_type="message/rfc822",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+@app.post("/api/drafts/{draft_id}/open")
+def open_draft_app(draft_id: int, request: Request):
+    _need_role(request, "hr")
+    return actions.open_draft_in_app(draft_id)
 
 
 @app.post("/api/drafts/{draft_id}/outlook-draft")

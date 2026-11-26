@@ -23,9 +23,11 @@ def _isolate_outlook(monkeypatch: pytest.MonkeyPatch):
     outlook.set_graph_backend(None)
     outlook.set_smtp_backend(None)
     outlook.set_msal_factory(None)
+    outlook.set_desktop_launcher(None)
     outlook.reset_auth_state()
     yield
     outlook.set_graph_backend(None)
     outlook.set_smtp_backend(None)
     outlook.set_msal_factory(None)
+    outlook.set_desktop_launcher(None)
     outlook.reset_auth_state()

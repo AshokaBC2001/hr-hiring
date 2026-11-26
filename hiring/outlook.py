@@ -19,14 +19,17 @@ import html
 import mimetypes
 import os
 import re
+import shutil
 import smtplib
 import ssl
+import subprocess
+import sys
 import threading
 import time
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from urllib.parse import quote, urlencode
 
 import certifi
@@ -35,7 +38,7 @@ import msal
 
 from . import checks, config, db
 
-VALID_MODES = ("eml", "graph", "graph_draft", "graph_send", "smtp")
+VALID_MODES = ("eml", "outlook_app", "graph", "graph_draft", "graph_send", "smtp")
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 SCOPES = ["User.Read", "Mail.ReadWrite", "Mail.Send"]
 MAX_GRAPH_ATTACHMENT_BYTES = 3 * 1024 * 1024
@@ -63,6 +66,7 @@ _http_client: httpx.Client | None = None
 _graph_backend: Callable[[str, str, dict[str, Any], str, dict[str, Any]], dict[str, Any]] | None = None
 _smtp_backend: Callable[[EmailMessage, dict[str, Any]], str] | None = None
 _msal_factory: Callable[[str, str, msal.SerializableTokenCache], Any] | None = None
+_desktop_launcher: Callable[..., str] | None = None
 
 _auth_lock = threading.Lock()
 _auth_state: dict[str, Any] = {
@@ -94,6 +98,12 @@ def set_msal_factory(fn: Callable[[str, str, msal.SerializableTokenCache], Any] 
     """Inject a custom MSAL PublicClientApplication factory in tests."""
     global _msal_factory
     _msal_factory = fn
+
+
+def set_desktop_launcher(fn: Callable[..., str] | None) -> None:
+    """Inject a desktop mail launcher stub in tests: ``fn(eml_path, **kwargs) -> app_name``."""
+    global _desktop_launcher
+    _desktop_launcher = fn
 
 
 def reset_auth_state() -> None:
@@ -888,9 +898,11 @@ def deliver_draft(
     body: str,
     *,
     attachment: tuple[str, bytes] | None = None,
+    eml_path: Path | None = None,
+    attachment_paths: Sequence[Path] | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Dispatch an email using the configured Outlook mode ('eml', 'graph', 'graph_draft', 'graph_send', 'smtp')."""
+    """Dispatch an email using the configured Outlook mode ('eml', 'outlook_app', 'graph', 'graph_draft', 'graph_send', 'smtp')."""
     cfg = cfg or raw_settings()
     mode = cfg.get("mode", "eml")
     if mode == "graph_draft":
@@ -900,6 +912,52 @@ def deliver_draft(
     if mode == "smtp":
         return send_smtp_email(to_email, to_name, subject, body, attachment=attachment, cfg=cfg)
     recipient = _safe_header(cfg.get("test_recipient") or to_email)
+    if mode == "outlook_app":
+        target_eml = eml_path
+        if target_eml is None:
+            sender_email = _safe_header(cfg.get("smtp_user") or "hiring@example.com")
+            msg = EmailMessage()
+            msg["From"] = formataddr((_safe_header(cfg.get("from_name") or "HR Hiring Team"), sender_email))
+            msg["To"] = formataddr((_safe_header(to_name), recipient)) if to_name else recipient
+            msg["Subject"] = _safe_header(subject)
+            msg["Date"] = formatdate(localtime=True)
+            msg["X-Unsent"] = "1"
+            msg["X-Uniform-Type-Identifier"] = "com.apple.mail-draft"
+            msg.set_content(body)
+            msg.add_alternative(_plain_to_html(body), subtype="html")
+            if attachment is not None:
+                fname, data = attachment
+                msg.add_attachment(data, maintype="application", subtype="pdf", filename=_safe_header(fname))
+            target_eml = db.paths.outbox / "outlook_test.eml"
+            target_eml.write_bytes(msg.as_bytes())
+        try:
+            app_name = open_eml_in_desktop_app(
+                target_eml,
+                to_email=recipient,
+                to_name=_safe_header(to_name),
+                subject=_safe_header(subject),
+                html=_plain_to_html(body),
+                text=body,
+                attachments=attachment_paths,
+            )
+            return {
+                "ok": True,
+                "delivery_status": "opened_app",
+                "opened_in": app_name,
+                "sent_to": recipient,
+                "message_id": "",
+                "web_link": "",
+                "error": "",
+            }
+        except OutlookError as exc:
+            return {
+                "ok": False,
+                "delivery_status": "failed",
+                "sent_to": recipient,
+                "message_id": "",
+                "web_link": "",
+                "error": str(exc),
+            }
     return {
         "ok": True,
         "delivery_status": "eml_only",
@@ -927,7 +985,7 @@ def send_test(target: str) -> dict[str, Any]:
         acct = get_signed_in_account(cfg)
         if acct is not None:
             return create_outlook_draft(clean_target, "HR Test", subject, body, cfg=cfg)
-        raise ValueError("Currently in .eml file mode. Choose Microsoft Graph Drafts, Graph Send, or Office 365 SMTP to test live Outlook delivery.")
+        raise ValueError("Currently in .eml file mode. Choose Open in Outlook App, Microsoft Graph, or Office 365 SMTP to test Outlook delivery.")
     return deliver_draft(clean_target, "HR Test", subject, body, cfg=cfg)
 
 
@@ -946,3 +1004,100 @@ def compose_links(to_email: str, subject: str, body: str, test_recipient: str = 
         "outlook_live": f"https://outlook.live.com/mail/0/deeplink/compose?{params}",
         "mailto": f"mailto:{quote(target)}?{urlencode({'subject': clean_subj, 'body': clean_body}, quote_via=quote)}",
     }
+
+
+_CLASSIC_OUTLOOK_SCRIPT = """on run argv
+    set subj to item 1 of argv
+    set bodyTxt to item 2 of argv
+    set toName to item 3 of argv
+    set toAddr to item 4 of argv
+    tell application "Microsoft Outlook"
+        set msg to make new outgoing message with properties {subject:subj, content:bodyTxt}
+        tell msg
+            if toAddr is not "" then
+                if toName is not "" then
+                    make new recipient at it with properties {type:to recipient type, email address:{name:toName, address:toAddr}}
+                else
+                    make new recipient at it with properties {type:to recipient type, email address:{address:toAddr}}
+                end if
+            end if
+            repeat with i from 5 to (count of argv)
+                set attPath to item i of argv
+                if attPath is not "" then
+                    set attAlias to (POSIX file attPath) as alias
+                    make new attachment at it with properties {file:attAlias}
+                end if
+            end repeat
+        end tell
+        open msg
+        activate
+    end tell
+end run"""
+
+
+def _open_classic_outlook_mac(
+    to_email: str,
+    to_name: str,
+    subject: str,
+    body_content: str,
+    attachments: Sequence[Path],
+) -> bool:
+    cmd = ["osascript", "-", subject, body_content, to_name, to_email, *(str(p) for p in attachments if p.is_file())]
+    res = subprocess.run(cmd, input=_CLASSIC_OUTLOOK_SCRIPT, capture_output=True, text=True, check=False, timeout=12)
+    return res.returncode == 0
+
+
+def open_eml_in_desktop_app(
+    eml_path: Path,
+    *,
+    to_email: str = "",
+    to_name: str = "",
+    subject: str = "",
+    html: str = "",
+    text: str = "",
+    attachments: Sequence[Path] | None = None,
+) -> str:
+    """Open a generated .eml draft in Microsoft Outlook Desktop (or default Mail app)."""
+    if not eml_path.is_file():
+        raise OutlookError(f"Draft file not found: {eml_path.name}")
+    att_list = [p for p in (attachments or []) if p.is_file()]
+    if _desktop_launcher is not None:
+        return _desktop_launcher(
+            eml_path,
+            to_email=to_email,
+            to_name=to_name,
+            subject=subject,
+            html=html,
+            text=text,
+            attachments=att_list,
+        )
+
+    path_str = str(eml_path)
+    if sys.platform == "darwin":
+        has_outlook = subprocess.run(["open", "-Ra", "Microsoft Outlook"], capture_output=True, check=False, timeout=5).returncode == 0
+        if has_outlook:
+            if to_email and subject and _open_classic_outlook_mac(to_email, to_name, subject, html or text, att_list):
+                return "Microsoft Outlook"
+            res = subprocess.run(["open", "-a", "Microsoft Outlook", path_str], capture_output=True, text=True, check=False, timeout=12)
+            if res.returncode == 0:
+                return "Microsoft Outlook"
+        res_mail = subprocess.run(["open", "-a", "Mail", path_str], capture_output=True, text=True, check=False, timeout=12)
+        if res_mail.returncode == 0:
+            return "Apple Mail"
+        res_any = subprocess.run(["open", path_str], capture_output=True, text=True, check=False, timeout=12)
+        if res_any.returncode == 0:
+            return "Mail"
+        raise OutlookError((res_any.stderr or res_mail.stderr or "Could not open Mail app on macOS.").strip())
+
+    if sys.platform == "win32":
+        try:
+            os.startfile(path_str)  # type: ignore[attr-defined]
+            return "Outlook Desktop"
+        except OSError as exc:
+            raise OutlookError(f"Could not open desktop Outlook/Mail app: {exc}") from exc
+
+    opener = shutil.which("xdg-open")
+    if not opener:
+        raise OutlookError("No desktop mail launcher found. Download the .eml file instead.")
+    subprocess.Popen([opener, path_str], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return "Desktop Mail"

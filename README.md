@@ -21,9 +21,10 @@ A local, AI-assisted intern hiring workflow built for **SLT (Sri Lanka Telecom)*
 - Scores are calculated by code, not by the model (with pre-tokenized CV and stem-prefix caching).
 - Every model answer is checked against the CV before it is saved.
 - Flexible Microsoft Outlook email integration (`hiring/mailer.py` + `hiring/outlook.py`):
+  - **One-click Outlook Desktop / Mail app (`outlook_app`, default on `./start_mail.sh` & `./start_app.sh`):** Zero Azure setup or passwords — clicking Send generates the draft with all attachments, archives an `.eml` in `data/outbox/`, and opens it right inside Outlook Desktop / Apple Mail so the supervisor just clicks **Send**.
   - **Microsoft Graph sending (`graph` / `graph_draft`)** powered by Microsoft's official `msal` library (OAuth 2.0 Device Code Flow): creates an Outlook draft, adds each attachment one by one (using `createUploadSession` in 320 KiB chunks for files $\ge 3\text{ MB}$), and sends it.
   - **Office 365 SMTP fallback (`smtp.office365.com:587`)** if Microsoft Graph fails or when SMTP AUTH is preferred.
-  - Default **`.eml` mode**: archives Outlook-ready `.eml` files (`X-Unsent: 1`) in `data/outbox/` alongside Outlook Web compose links.
+  - **`.eml` archive (`eml` mode):** Archives Outlook-ready `.eml` files (`X-Unsent: 1`) in `data/outbox/` alongside Outlook Web compose links.
 - After a Pass, a placement letter (plain A4 PDF) is made by code and attached to the acceptance email.
 - Plain web UI with two roles (plus **Mail-only mode** via `./start_mail.sh`).
 
@@ -102,9 +103,10 @@ On each candidate page:
    and give the reference number. The next number is suggested from the last one used.
 
 **Sending:** `hiring/mailer.py` (backed by `hiring/outlook.py`) handles Outlook delivery:
+- **Open in Outlook Desktop / Mail app (`outlook_app`, default on `./start_mail.sh` & `./start_app.sh`):** Zero Azure setup or passwords — clicking Send creates the draft with all 4 attachments, archives an `.eml` in `data/outbox/`, and opens it right inside Outlook Desktop / Apple Mail so you just click **Send**.
 - **Microsoft Graph (`graph` mode):** Signs in via Microsoft OAuth 2.0 Device Code Flow (`msal`), creates a draft (`POST /v1.0/me/messages`), attaches every file one by one (automatically switching to `createUploadSession` in 320 KiB-aligned chunks for files $\ge 3\text{ MB}$ such as `individual user manual.pdf`), and sends (`POST /v1.0/me/messages/{id}/send`).
 - **Office 365 SMTP fallback (`smtp.office365.com:587`):** Automatically falls back to Office 365 STARTTLS SMTP if Graph fails and SMTP credentials are saved (or can be selected directly in **Mail settings → Outlook sending**).
-- **`.eml` archive (`eml` mode, default):** Saves an Outlook-ready `.eml` file in `data/outbox/` with all attachments inside (double-click it to open in Mail or Outlook). Sent mails in `graph`/`smtp` modes are also archived to `data/outbox/`.
+- **`.eml` archive (`eml` mode):** Saves an Outlook-ready `.eml` file in `data/outbox/` with all attachments inside (double-click it to open in Mail or Outlook). Sent mails in `outlook_app`/`graph`/`smtp` modes are also archived to `data/outbox/`.
 - **Real test send:** Configure Outlook on **Mail settings**, enter a test inbox email, and click **Send test mail** (or run `.venv/bin/python run.py mail-test --target <email>`).
 
 The template is `shared/mail/invitation.txt` and the subject and sender are in `shared/mail/mail.json`.

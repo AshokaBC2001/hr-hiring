@@ -159,10 +159,10 @@ NOT_IN_HIRING = POOL_STATUSES | {"archived"}
 # Delivery modes: "eml" (outbox .eml + Outlook Web links), "graph" / "graph_send"
 # (direct send via Microsoft Graph draft + attachments + upload session for >3 MB),
 # "graph_draft" (Outlook Drafts via Microsoft Graph), or "smtp" (Office 365 SMTP AUTH).
-_RAW_OUTLOOK_MODE = os.environ.get("HR_OUTLOOK_MODE", "eml").strip().lower()
+_RAW_OUTLOOK_MODE = (os.environ.get("HR_OUTLOOK_MODE") or os.environ.get("OUTLOOK_MODE") or "eml").strip().lower()
 OUTLOOK_MODE = (
     _RAW_OUTLOOK_MODE
-    if _RAW_OUTLOOK_MODE in ("eml", "graph", "graph_draft", "graph_send", "smtp")
+    if _RAW_OUTLOOK_MODE in ("eml", "outlook_app", "graph", "graph_draft", "graph_send", "smtp")
     else "eml"
 )
 OUTLOOK_CLIENT_ID = os.environ.get("HR_OUTLOOK_CLIENT_ID", "").strip()

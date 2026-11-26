@@ -5,4 +5,4 @@ if [ ! -x .venv/bin/python ]; then
   echo "Run ./setup.sh first."
   exit 1
 fi
-exec .venv/bin/python app.py
+HR_OUTLOOK_MODE="${HR_OUTLOOK_MODE:-outlook_app}" exec .venv/bin/python app.py

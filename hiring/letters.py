@@ -229,6 +229,7 @@ def email_file(c: db.Candidate, subject: str, body: str, attach: bool) -> bytes:
     msg["Subject"] = subject
     msg["Date"] = formatdate(localtime=True)
     msg["X-Unsent"] = "1"                 # Outlook opens it as a message ready to send
+    msg["X-Uniform-Type-Identifier"] = "com.apple.mail-draft"  # Apple Mail opens it editable to send
     msg.set_content(body)
     if attach:
         msg.add_attachment(read(c), maintype="application", subtype="pdf", filename=file_name(c))

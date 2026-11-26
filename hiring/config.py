@@ -169,6 +169,7 @@ OUTLOOK_MODE = (
 # via HR_OUTLOOK_CLIENT_ID in .env so the supervisor can sign in with a single click without typing IDs).
 OUTLOOK_CLIENT_ID = os.environ.get("HR_OUTLOOK_CLIENT_ID", "").strip()
 OUTLOOK_TENANT_ID = os.environ.get("HR_OUTLOOK_TENANT_ID", "common").strip() or "common"
+OUTLOOK_SENDER_EMAIL = os.environ.get("HR_OUTLOOK_SENDER_EMAIL", "").strip()
 OUTLOOK_FROM_NAME = os.environ.get("HR_OUTLOOK_FROM_NAME", "HR Hiring Team").strip()
 OUTLOOK_TEST_RECIPIENT = os.environ.get("HR_OUTLOOK_TEST_RECIPIENT", "").strip()
 OUTLOOK_SMTP_HOST = os.environ.get("HR_OUTLOOK_SMTP_HOST", "smtp.office365.com").strip()

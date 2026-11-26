@@ -10,12 +10,14 @@ def _isolate_outlook(monkeypatch: pytest.MonkeyPatch):
     """Ensure tests default to offline `.eml` mode with no live credentials or backends."""
     monkeypatch.setenv("HR_OUTLOOK_MODE", "eml")
     monkeypatch.setenv("HR_OUTLOOK_CLIENT_ID", "")
+    monkeypatch.setenv("HR_OUTLOOK_SENDER_EMAIL", "")
     monkeypatch.setenv("HR_OUTLOOK_TEST_RECIPIENT", "")
     monkeypatch.setenv("HR_OUTLOOK_SMTP_USER", "")
     monkeypatch.setenv("HR_OUTLOOK_SMTP_PASSWORD", "")
 
     monkeypatch.setattr(config, "OUTLOOK_MODE", "eml")
     monkeypatch.setattr(config, "OUTLOOK_CLIENT_ID", "")
+    monkeypatch.setattr(config, "OUTLOOK_SENDER_EMAIL", "")
     monkeypatch.setattr(config, "OUTLOOK_TEST_RECIPIENT", "")
     monkeypatch.setattr(config, "OUTLOOK_SMTP_USER", "")
     monkeypatch.setattr(config, "OUTLOOK_SMTP_PASSWORD", "")

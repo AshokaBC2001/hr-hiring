@@ -1,52 +1,45 @@
 # HR Hiring (Mail Mode) — Supervisor Quick Guide
 
-Welcome! You do **not** need to configure passwords, servers, or developer IDs to send internship invitations.
+Everything works straight away: just save your Outlook email once, upload CVs, and click **Send mail**.
 
 ---
 
 ## 1. Starting the System
-1. Double-click **`Start_HR_Mail.command`** in the `hr-hiring` folder (or run `./start_mail.sh` after `./start_model.sh`).
-2. Keep the window open—your web browser will open **[http://localhost:8000](http://localhost:8000)** automatically.
-3. Wait until the badge in the top-right says **Model: running** (green).
-   *(Need a reminder anytime inside the app? Click **Quick guide** at the top right.)*
+1. Double-click **`Start_HR_Mail.command`** inside the `hr-hiring` folder (keep the small window open).
+2. Your browser will open **[http://localhost:8000](http://localhost:8000)** automatically.
+3. Wait a moment until the badge at the top right shows **Model: running** (green).
+   *(Click **Quick guide** at the top right anytime for an on-screen reminder.)*
 
 ---
 
-## 2. Sending an Internship Invitation (4 Steps)
-1. **Add CV**
-   - Drag and drop one or more student CV files (PDF, Word `.docx`, or `.txt`) into the upload box.
-   - Optionally type the **Source** (who forwarded the CV) and click **Add CVs**.
-   - Wait a few seconds while the system reads the student's **Name, Email, University, and Technology** and places them in the **Register**.
-2. **Open the Student**
-   - Click **Register** in the top menu, then click the student's row.
-   - If the CV did not include an email address, click **Edit** next to Email and type it in.
-3. **Check the Mail & Visit Date**
-   - Scroll to **Invitation mail**. The next **Tuesday** date and all 4 required SLT attachments (`Hospital_system.pdf`, `individual user manual.pdf`, `POS Task Backlog.xlsx`, `Trainee_Guidelines_Agreement.pdf`) are already filled in.
-   - Click **Preview** if you want to check how the mail looks.
-4. **Click Send mail → Send in Outlook**
-   - Click **Send mail** and confirm.
-   - Your **Microsoft Outlook** (or Apple Mail) app will pop open with the email, recipient, subject, formatted text, and all 4 attachments already attached.
-   - Just click **Send** inside Outlook. The Register automatically updates the **Mail date** and sets Status to **Mail sent**.
+## 2. One-Time Email Setup (30 Seconds)
+1. Click **Mail settings** in the top menu and scroll to **Outlook sending**.
+2. Enter:
+   - **Sender Name** (for example `Giridaran` or `Digital Platforms Development Section`)
+   - **Your Outlook Email** (for example `you@slt.com.lk` or `you@outlook.com`)
+   - **Outlook Password / App Password** — *optional*: leave it blank if you want mails to send through your Outlook / Mail app on your computer, or enter it if IT uses Office 365 SMTP.
+3. Click **Save Outlook settings**.
+4. *(Optional check)* Type your own email under **Send a test email** and click **Send test mail** to verify all 4 SLT attachments arrive cleanly.
 
 ---
 
-## 3. Recording Replies & Exporting to Excel
-1. When the student replies with their NIC, Contact No, and Laptop Serial No:
-   - Open **Register**, click the student's row, and scroll to **Register details**.
-   - Click **Use next: ...** to fill the next reference number automatically, fill in **NIC / PP**, **Tel No**, and **Laptop Serial No**, change Status to **Replied** or **Confirmed**, and click **Save register details**.
-2. On the **Register** page, click **Export to Excel** anytime to download the formatted `.xlsx` sheet matching SLT's template.
+## 3. Sending an Invitation Mail
+1. **Add CV:** Drag and drop student CV files (PDF, Word `.docx`, or `.txt`) into **Add CV**, optionally type **Source**, and click **Add CVs**.
+2. **Open Student:** Go to **Register** and click the student's row. If no email was inside the CV, click **Edit** next to Email and add it.
+3. **Check & Send:** Verify the suggested **Tuesday** visit date and attachments (click **Preview** if desired), then click **Send mail**.
+   - If your Outlook app handles sending, it opens/sends cleanly from your saved Outlook address (just click **Send** if a draft window opens).
+   - The **Register** automatically records today's **Mail date** and marks the student **Mail sent**.
 
 ---
 
-## 4. Changing Attachments or Mail Text (Optional)
-- Open **Mail settings** in the top bar to:
-  - Add extra attachments or replace one of the 4 standard files.
-  - Edit the standard invitation wording or subject (or reset back to the original).
-  - **(Optional 1-click automatic sending):** If your IT admin has configured a Microsoft sign-in app for the team, click **Sign in with Microsoft** in **Mail settings** once so emails send straight in the background without even opening the Outlook window.
+## 4. Recording Student Replies & Downloading Excel
+1. When a student replies, open their row in **Register** and scroll to **Register details**.
+2. Click **Use next: ...** to fill the next reference number automatically, enter **NIC / PP**, **Tel No**, and **Laptop Serial No**, choose Status (**Replied** / **Confirmed**), and click **Save register details**.
+3. On the **Register** page, click **Export to Excel** anytime to download the SLT `.xlsx` spreadsheet.
 
 ---
 
 ## Quick Troubleshooting
-- **Need to open a sent mail again?** Open the student's page and click **Open in Outlook / Mail app** (or **Download .eml**).
-- **The email didn't open Outlook?** Check the green/red message in the bottom-right corner, or click **Download .eml** and double-click the downloaded file.
-- **Finished for the day?** Close the terminal window (or press `Control+C`). All records stay saved on your computer.
+- **Need to open a sent email again?** Open the student's page and click **Open in Outlook / Mail app** (or **Download .eml**).
+- **IT asks you to connect with Microsoft 365 login?** Expand **Advanced options** under **Outlook sending**, paste the Application ID IT gives you, and click **Sign in with Microsoft**.
+- **Done for the day?** Close the terminal window (or press `Control+C`). All records stay saved on your computer.

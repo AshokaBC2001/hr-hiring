@@ -172,7 +172,11 @@ def raw_settings() -> dict[str, Any]:
     from_name = db.get_setting("outlook_from_name").strip() or config.OUTLOOK_FROM_NAME
     test_recipient = db.get_setting("outlook_test_recipient").strip() or config.OUTLOOK_TEST_RECIPIENT
     smtp_host = db.get_setting("outlook_smtp_host").strip() or config.OUTLOOK_SMTP_HOST
+    saved_sender = db.get_setting("outlook_sender_email").strip() or config.OUTLOOK_SENDER_EMAIL
     smtp_user = db.get_setting("outlook_smtp_user").strip() or config.OUTLOOK_SMTP_USER
+    sender_email = saved_sender or smtp_user
+    if sender_email and not smtp_user:
+        smtp_user = sender_email
     smtp_password = db.get_setting("outlook_smtp_password") or config.OUTLOOK_SMTP_PASSWORD
     smtp_use_tls = _parse_bool(db.get_setting("outlook_smtp_use_tls"), config.OUTLOOK_SMTP_USE_TLS)
     smtp_fallback = _parse_bool(db.get_setting("outlook_smtp_fallback"), config.OUTLOOK_SMTP_FALLBACK)
@@ -181,6 +185,7 @@ def raw_settings() -> dict[str, Any]:
         "client_id": client_id,
         "tenant_id": tenant_id,
         "from_name": from_name,
+        "sender_email": sender_email,
         "test_recipient": test_recipient,
         "smtp_host": smtp_host,
         "smtp_port": smtp_port,
@@ -222,6 +227,7 @@ def public_settings() -> dict[str, Any]:
         "has_client_id": bool(cfg["client_id"]),
         "tenant_id": cfg["tenant_id"],
         "from_name": cfg["from_name"],
+        "sender_email": cfg["sender_email"],
         "test_recipient": cfg["test_recipient"],
         "smtp_host": cfg["smtp_host"],
         "smtp_port": cfg["smtp_port"],
@@ -251,6 +257,10 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Tenant ID must contain only letters, numbers, dots, or hyphens (e.g. 'common' or directory GUID).")
 
     from_name = str(payload.get("from_name", cur["from_name"])).strip()[:120] or "HR Hiring Team"
+    sender_email = str(payload.get("sender_email", cur["sender_email"])).strip()[:200]
+    if sender_email and not checks.EMAIL_RE.fullmatch(sender_email):
+        raise ValueError(f'Your Outlook email "{sender_email}" must be a valid email address.')
+
     test_recipient = str(payload.get("test_recipient", cur["test_recipient"])).strip()[:200]
     if test_recipient and not checks.EMAIL_RE.fullmatch(test_recipient):
         raise ValueError(f'Demo redirect email "{test_recipient}" is not a valid email address.')
@@ -264,7 +274,8 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     if not 1 <= smtp_port <= 65535:
         raise ValueError("SMTP port must be between 1 and 65535.")
 
-    smtp_user = str(payload.get("smtp_user", cur["smtp_user"])).strip()[:200]
+    raw_smtp_user = str(payload.get("smtp_user", "")).strip()[:200] if "smtp_user" in payload else cur["smtp_user"]
+    smtp_user = raw_smtp_user or sender_email
     if smtp_user and not checks.EMAIL_RE.fullmatch(smtp_user):
         raise ValueError(f'Outlook SMTP username "{smtp_user}" must be a valid email address.')
 
@@ -291,6 +302,7 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     db.set_setting("outlook_client_id", client_id)
     db.set_setting("outlook_tenant_id", tenant_id)
     db.set_setting("outlook_from_name", from_name)
+    db.set_setting("outlook_sender_email", sender_email)
     db.set_setting("outlook_test_recipient", test_recipient)
     db.set_setting("outlook_smtp_host", smtp_host)
     db.set_setting("outlook_smtp_port", str(smtp_port))
@@ -456,7 +468,12 @@ def start_interactive_login() -> dict[str, Any]:
 
     def _run_interactive() -> None:
         try:
-            result = app.acquire_token_interactive(scopes=SCOPES, prompt="select_account", timeout=180)
+            result = app.acquire_token_interactive(
+                scopes=SCOPES,
+                prompt="select_account",
+                login_hint=(cfg.get("sender_email") or None),
+                timeout=180,
+            )
             _save_cache(cache)
             if isinstance(result, dict) and "access_token" in result:
                 claims = result.get("id_token_claims") or {}
@@ -1005,6 +1022,7 @@ def deliver_draft(
         try:
             app_name = open_eml_in_desktop_app(
                 target_eml,
+                sender_email=_safe_header(cfg.get("sender_email") or cfg.get("smtp_user") or ""),
                 to_email=recipient,
                 to_name=_safe_header(to_name),
                 subject=_safe_header(subject),
@@ -1084,8 +1102,44 @@ _CLASSIC_OUTLOOK_SCRIPT = """on run argv
     set bodyTxt to item 2 of argv
     set toName to item 3 of argv
     set toAddr to item 4 of argv
+    set senderEmail to item 5 of argv
     tell application "Microsoft Outlook"
-        set msg to make new outgoing message with properties {subject:subj, content:bodyTxt}
+        set matchedAcc to missing value
+        if senderEmail is not "" then
+            try
+                repeat with a in (every exchange account)
+                    if (email address of a) is senderEmail then
+                        set matchedAcc to a
+                        exit repeat
+                    end if
+                end repeat
+            end try
+            if matchedAcc is missing value then
+                try
+                    repeat with a in (every imap account)
+                        if (email address of a) is senderEmail then
+                            set matchedAcc to a
+                            exit repeat
+                        end if
+                    end repeat
+                end try
+            end if
+            if matchedAcc is missing value then
+                try
+                    repeat with a in (every pop account)
+                        if (email address of a) is senderEmail then
+                            set matchedAcc to a
+                            exit repeat
+                        end if
+                    end repeat
+                end try
+            end if
+        end if
+        if matchedAcc is not missing value then
+            set msg to make new outgoing message with properties {account:matchedAcc, subject:subj, content:bodyTxt}
+        else
+            set msg to make new outgoing message with properties {subject:subj, content:bodyTxt}
+        end if
         tell msg
             if toAddr is not "" then
                 if toName is not "" then
@@ -1094,7 +1148,7 @@ _CLASSIC_OUTLOOK_SCRIPT = """on run argv
                     make new recipient at it with properties {type:to recipient type, email address:{address:toAddr}}
                 end if
             end if
-            repeat with i from 5 to (count of argv)
+            repeat with i from 6 to (count of argv)
                 set attPath to item i of argv
                 if attPath is not "" then
                     set attAlias to (POSIX file attPath) as alias
@@ -1102,27 +1156,82 @@ _CLASSIC_OUTLOOK_SCRIPT = """on run argv
                 end if
             end repeat
         end tell
-        open msg
-        activate
+        if matchedAcc is not missing value then
+            send msg
+        else
+            open msg
+            activate
+        end if
     end tell
 end run"""
 
 
+_WINDOWS_OUTLOOK_PS = """
+$ErrorActionPreference = 'Stop'
+$outlook = New-Object -ComObject Outlook.Application
+$mail = $outlook.CreateItem(0)
+$mail.To = $env:HR_PS_TO
+$mail.Subject = $env:HR_PS_SUBJ
+if ($env:HR_PS_HTML) { $mail.HTMLBody = $env:HR_PS_HTML } else { $mail.Body = $env:HR_PS_TEXT }
+if ($env:HR_PS_SENDER) {
+    foreach ($acc in $outlook.Session.Accounts) {
+        if ($acc.SmtpAddress -and ($acc.SmtpAddress.ToLower() -eq $env:HR_PS_SENDER.ToLower())) {
+            $mail.SendUsingAccount = $acc
+            break
+        }
+    }
+}
+if ($env:HR_PS_ATTACHMENTS) {
+    foreach ($p in ($env:HR_PS_ATTACHMENTS -split "`n")) {
+        if ($p -and (Test-Path -LiteralPath $p)) {
+            [void]$mail.Attachments.Add($p)
+        }
+    }
+}
+$mail.Send()
+[void][System.Runtime.Interopservices.Marshal]::ReleaseComObject($outlook)
+"""
+
+
 def _open_classic_outlook_mac(
+    sender_email: str,
     to_email: str,
     to_name: str,
     subject: str,
     body_content: str,
     attachments: Sequence[Path],
 ) -> bool:
-    cmd = ["osascript", "-", subject, body_content, to_name, to_email, *(str(p) for p in attachments if p.is_file())]
+    cmd = ["osascript", "-", subject, body_content, to_name, to_email, sender_email, *(str(p) for p in attachments if p.is_file())]
     res = subprocess.run(cmd, input=_CLASSIC_OUTLOOK_SCRIPT, capture_output=True, text=True, check=False, timeout=12)
+    return res.returncode == 0
+
+
+def _open_windows_outlook_com(
+    sender_email: str,
+    to_email: str,
+    subject: str,
+    html_body: str,
+    text_body: str,
+    attachments: Sequence[Path],
+) -> bool:
+    ps_exe = shutil.which("powershell") or shutil.which("pwsh")
+    if not ps_exe:
+        return False
+    env = dict(os.environ)
+    env["HR_PS_SENDER"] = sender_email or ""
+    env["HR_PS_TO"] = to_email or ""
+    env["HR_PS_SUBJ"] = subject or ""
+    env["HR_PS_HTML"] = html_body or ""
+    env["HR_PS_TEXT"] = text_body or ""
+    env["HR_PS_ATTACHMENTS"] = "\n".join(str(p) for p in attachments if p.is_file())
+    res = subprocess.run([ps_exe, "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_OUTLOOK_PS], env=env, capture_output=True, text=True, check=False, timeout=15)
     return res.returncode == 0
 
 
 def open_eml_in_desktop_app(
     eml_path: Path,
     *,
+    sender_email: str = "",
     to_email: str = "",
     to_name: str = "",
     subject: str = "",
@@ -1130,13 +1239,14 @@ def open_eml_in_desktop_app(
     text: str = "",
     attachments: Sequence[Path] | None = None,
 ) -> str:
-    """Open a generated .eml draft in Microsoft Outlook Desktop (or default Mail app)."""
+    """Open or send a generated .eml draft via Microsoft Outlook Desktop (or default Mail app)."""
     if not eml_path.is_file():
         raise OutlookError(f"Draft file not found: {eml_path.name}")
     att_list = [p for p in (attachments or []) if p.is_file()]
     if _desktop_launcher is not None:
         return _desktop_launcher(
             eml_path,
+            sender_email=sender_email,
             to_email=to_email,
             to_name=to_name,
             subject=subject,
@@ -1149,7 +1259,7 @@ def open_eml_in_desktop_app(
     if sys.platform == "darwin":
         has_outlook = subprocess.run(["open", "-Ra", "Microsoft Outlook"], capture_output=True, check=False, timeout=5).returncode == 0
         if has_outlook:
-            if to_email and subject and _open_classic_outlook_mac(to_email, to_name, subject, html or text, att_list):
+            if to_email and subject and _open_classic_outlook_mac(sender_email, to_email, to_name, subject, html or text, att_list):
                 return "Microsoft Outlook"
             res = subprocess.run(["open", "-a", "Microsoft Outlook", path_str], capture_output=True, text=True, check=False, timeout=12)
             if res.returncode == 0:
@@ -1163,6 +1273,8 @@ def open_eml_in_desktop_app(
         raise OutlookError((res_any.stderr or res_mail.stderr or "Could not open Mail app on macOS.").strip())
 
     if sys.platform == "win32":
+        if to_email and subject and _open_windows_outlook_com(sender_email, to_email, subject, html, text, att_list):
+            return "Outlook Desktop"
         try:
             os.startfile(path_str)  # type: ignore[attr-defined]
             return "Outlook Desktop"

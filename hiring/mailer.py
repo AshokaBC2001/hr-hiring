@@ -130,15 +130,23 @@ def send_mail(
         raise MailError(f'Recipient email "{recipient_email}" is not a valid email address.')
 
     to_header = formataddr((to_name.strip(), recipient_email)) if to_name.strip() else recipient_email
-    sender_name, _ = parseaddr(_safe_header(sender))
+    sender_name, sender_addr = parseaddr(_safe_header(sender))
+    cfg_sender = _safe_header(cfg.get("sender_email") or "")
+    effective_sender_addr = cfg_sender or sender_addr
+    effective_from = (
+        formataddr((_safe_header(cfg.get("from_name") or sender_name or "HR Hiring Team"), cfg_sender))
+        if cfg_sender and (not sender_addr or sender_addr.endswith("@example.com"))
+        else (sender or (formataddr((_safe_header(cfg.get("from_name") or "HR Hiring Team"), effective_sender_addr)) if effective_sender_addr else ""))
+    )
     mode = outlook.effective_mode(cfg)
 
     if mode in ("eml", "outlook_app"):
-        fname, mid = _save_eml(sender, to_header, subject, html, text, attachments, name_hint)
+        fname, mid = _save_eml(effective_from, to_header, subject, html, text, attachments, name_hint)
         if mode == "outlook_app":
             try:
                 opened_in = outlook.open_eml_in_desktop_app(
                     db.paths.outbox / fname,
+                    sender_email=effective_sender_addr,
                     to_email=recipient_email,
                     to_name=to_name.strip(),
                     subject=_safe_header(subject),
@@ -153,10 +161,10 @@ def send_mail(
                 "file": fname,
                 "message_id": mid,
                 "sent_to": recipient_email,
-                "sender": sender,
+                "sender": effective_sender_addr or effective_from,
                 "opened_in": opened_in,
             }
-        return {"how": "eml", "file": fname, "message_id": mid, "sent_to": recipient_email, "sender": sender}
+        return {"how": "eml", "file": fname, "message_id": mid, "sent_to": recipient_email, "sender": effective_from}
 
     if mode in ("graph", "graph_send", "graph_draft"):
         send_now = mode != "graph_draft"

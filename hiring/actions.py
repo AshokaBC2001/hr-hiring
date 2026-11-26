@@ -520,6 +520,7 @@ def open_draft_in_app(draft_id: int) -> dict:
     try:
         opened_in = outlook.open_eml_in_desktop_app(
             eml_path,
+            sender_email=outlook.raw_settings().get("sender_email", ""),
             to_email=to_email,
             to_name=to_name,
             subject=subject,

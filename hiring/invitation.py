@@ -60,6 +60,19 @@ def settings() -> dict:
     return out
 
 
+def effective_sender() -> str:
+    """Return configured Outlook sender if set, otherwise default template sender."""
+    ol = outlook.raw_settings()
+    acct = outlook.get_signed_in_account(ol)
+    addr = (ol.get("sender_email") or (acct.get("username") if acct else "") or ol.get("smtp_user") or "").strip()
+    if addr:
+        name = (ol.get("from_name") or "").strip()
+        if not name or name == "HR Hiring Team":
+            name = "Digital Platforms Development Section"
+        return formataddr((name, addr))
+    return settings().get("sender", "")
+
+
 def template() -> str:
     own = _own("invitation.txt")
     return (own if own.exists() else DEFAULT_TEMPLATE).read_text(encoding="utf-8")
@@ -237,7 +250,7 @@ def send(app_no: str) -> dict:
     to_hdr = formataddr((c.name, c.email)) if c.name else c.email
     try:
         result = mailer.send_mail(to_hdr, d["subject"], to_html(d["body"]),
-                                  d["body"], paths, sender=settings().get("sender", ""),
+                                  d["body"], paths, sender=effective_sender(),
                                   name_hint=f"{c.app_no}_invitation_{datetime.now():%Y%m%d%H%M%S}")
     except mailer.MailError as e:
         raise MailProblem(str(e)) from e
@@ -293,6 +306,7 @@ def open_sent_eml(app_no: str) -> dict:
     try:
         opened_in = outlook.open_eml_in_desktop_app(
             path,
+            sender_email=outlook.raw_settings().get("sender_email", ""),
             to_email=inv.get("sent_to") or c.email or "",
             to_name=c.name or "",
             subject=inv.get("subject", ""),
@@ -323,7 +337,7 @@ def send_test_invite(to_email: str) -> dict:
             to_html(body),
             body,
             paths,
-            sender=cfg.get("sender", ""),
+            sender=effective_sender(),
             name_hint=f"test_invitation_{datetime.now():%Y%m%d%H%M%S}",
         )
     except mailer.MailError as exc:

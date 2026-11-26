@@ -313,7 +313,7 @@ async def save_letter(app_no: str, request: Request):
 @app.get("/api/mail/settings")
 def mail_settings():
     s = invitation.settings()
-    return {"subject": s["subject"], "sender": s.get("sender", ""), "template": invitation.template(),
+    return {"subject": s["subject"], "sender": invitation.effective_sender(), "template": invitation.template(),
             "attachments": invitation.attachments(), "visit_weekday": s.get("visit_weekday", "Tuesday"),
             "next_visit_day": invitation.next_visit_day().isoformat(),
             "statuses": invitation.REGISTER_STATUSES, "ref_suggestion": invitation.suggest_ref(),
@@ -340,6 +340,7 @@ async def test_mail_invite(request: Request):
     target = str(
         b.get("to")
         or cfg.get("test_recipient")
+        or cfg.get("sender_email")
         or (acct.get("username") if acct else "")
         or cfg.get("smtp_user")
         or ""
@@ -936,6 +937,7 @@ async def test_outlook(request: Request):
     target = str(
         body.get("to")
         or cfg.get("test_recipient")
+        or cfg.get("sender_email")
         or (acct.get("username") if acct else "")
         or cfg.get("smtp_user")
         or ""

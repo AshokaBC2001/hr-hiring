@@ -441,3 +441,31 @@ def test_auto_mode_resolution_and_interactive_login(app_client: TestClient):
             break
     assert st.get("signed_in") is True
     assert app_client.get("/api/outlook/settings").json()["effective_mode"] == "graph"
+
+
+def test_sender_email_passed_to_desktop_launcher_and_eml_from(app_client: TestClient):
+    headers_hr = {"x-role": "hr"}
+    seen: list[dict] = []
+    outlook.set_desktop_launcher(lambda p, **kw: (seen.append({"path": p, **kw}), "Microsoft Outlook")[1])
+
+    r = app_client.post(
+        "/api/outlook/settings",
+        json={"mode": "auto", "from_name": "Giridaran", "sender_email": "giridaran@slt.com.lk"},
+        headers=headers_hr,
+    )
+    assert r.status_code == 200 and r.json()["sender_email"] == "giridaran@slt.com.lk"
+
+    tr = app_client.post("/api/outlook/test", json={"to": "supervisor@outlook.com"}, headers=headers_hr)
+    assert tr.status_code == 200 and tr.json()["delivery_status"] == "opened_app"
+    assert seen[-1]["sender_email"] == "giridaran@slt.com.lk"
+
+    # Full-mode draft release uses saved sender_email in From: inside .eml
+    app_no = actions.add_cv("arjun_mehta.txt", (config.SAMPLES_DIR / "arjun_mehta.txt").read_bytes(), "")["app_no"]
+    flows.run_all_once()
+    actions.invite_from_pool(app_no, "AI/ML")
+    flows.run_all_once()
+    inv_id = [d["id"] for d in app_client.get("/api/drafts?state=waiting").json() if d["app_no"] == app_no][0]
+    app_client.post(f"/api/drafts/{inv_id}/release", headers=headers_hr)
+    eml = app_client.get(f"/api/drafts/{inv_id}/eml")
+    parsed = email.message_from_bytes(eml.content, policy=email.policy.default)
+    assert "giridaran@slt.com.lk" in parsed["From"] and seen[-1]["sender_email"] == "giridaran@slt.com.lk"

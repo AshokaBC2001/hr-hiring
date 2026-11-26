@@ -281,6 +281,8 @@ function _outlookControlsMarkup(c, prefix = "ol") {
   const isGraph = mode === "auto" || mode === "graph" || mode === "graph_send" || mode === "graph_draft";
   const showSmtp = mode === "smtp" || (isGraph && c.smtp_fallback !== false);
   const openAdv = !!a.error;
+  const savedEmail = c.sender_email || c.account?.username || c.smtp_user || "";
+  const customSmtpUser = c.smtp_user && c.smtp_user !== savedEmail ? c.smtp_user : "";
 
   const statusBanner = (c.signed_in && acct)
     ? `<div class="notice ok" style="padding:10px 12px"><div class="grow small"><b>Connected to Outlook:</b> ${esc(acct.name)} (${esc(acct.username)}).<br>Emails and attachments are sent automatically from your Outlook account.</div><button type="button" class="btn small" data-dlg="ol-signout">Sign out</button></div>`
@@ -289,10 +291,12 @@ function _outlookControlsMarkup(c, prefix = "ol") {
     : a.status === "pending"
     ? `<div class="notice need" style="padding:10px 12px"><div class="grow small"><b>Waiting for Microsoft sign-in...</b> Finish signing in on the Microsoft browser window that just opened.</div></div>`
     : eff === "smtp"
-    ? `<div class="notice ok" style="padding:10px 12px"><div class="grow small"><b>Ready via Office 365 SMTP</b> (${esc(c.smtp_user || c.smtp_host)}). Emails send automatically with all attachments.</div></div>`
+    ? `<div class="notice ok" style="padding:10px 12px"><div class="grow small"><b>Saved sender:</b> ${esc(c.from_name || "HR Hiring Team")} &lt;${esc(savedEmail)}&gt;.<br>Ready to send directly via Outlook / Office 365 SMTP with all attachments.</div></div>`
     : eff === "eml"
-    ? `<div class="notice ok" style="padding:10px 12px"><div class="grow small"><b>Draft file mode (.eml).</b> Ready-to-open emails with attachments are saved to <code>data/outbox/</code>.</div></div>`
-    : `<div class="notice ok" style="padding:10px 12px"><div class="grow small"><b>Ready to use &mdash; no password or login needed.</b><br>Clicking <b>Send mail</b> opens the email (with all attachments) in Outlook Desktop or Apple Mail &mdash; just click <b>Send</b>.</div>${c.has_client_id ? `<button type="button" class="btn primary small" data-dlg="ol-signin">Sign in with Microsoft</button>` : ""}</div>`;
+    ? `<div class="notice ok" style="padding:10px 12px"><div class="grow small"><b>Draft file mode (.eml).</b> Ready-to-open emails are saved to <code>data/outbox/</code>.</div></div>`
+    : savedEmail
+    ? `<div class="notice ok" style="padding:10px 12px"><div class="grow small"><b>Saved sender:</b> ${esc(c.from_name || "HR Hiring Team")} &lt;${esc(savedEmail)}&gt;.<br>Clicking <b>Send mail</b> sends via your Outlook / Mail app with all attachments included.</div>${c.has_client_id ? `<button type="button" class="btn primary small" data-dlg="ol-signin">Sign in with Microsoft</button>` : ""}</div>`
+    : `<div class="notice ok" style="padding:10px 12px"><div class="grow small">Enter your name and Outlook email above, then click <b>Save Outlook settings</b>. (Password is optional &mdash; leave it blank to send through your Outlook / Mail app.)</div></div>`;
 
   const authBlock = acct
     ? `<div class="notice ok" style="padding:8px 10px"><div class="grow small"><b>Signed in sender:</b> ${esc(acct.name)} (${esc(acct.username)})</div><button type="button" class="btn small" data-dlg="ol-signout">Sign out</button></div>`
@@ -301,23 +305,32 @@ function _outlookControlsMarkup(c, prefix = "ol") {
     : `<div class="actions"><button type="button" class="btn primary small" data-dlg="ol-signin">Sign in with Microsoft (Browser)</button><button type="button" class="btn small" data-dlg="ol-device">Use sign-in code</button>${a.error ? `<span class="small" style="color:var(--fail)">${esc(a.error)}</span>` : ""}</div>`;
 
   return `
-    <div id="${prefix}-status-banner">${statusBanner}</div>
+    <div class="grid two">
+      <div class="form-row" style="margin:0"><label for="${prefix}-fname">Sender Name</label><input type="text" id="${prefix}-fname" value="${esc(c.from_name || "Digital Platforms Development Section")}" placeholder="e.g. Giridaran / SLT HR"></div>
+      <div class="form-row" style="margin:0"><label for="${prefix}-semail">Your Outlook Email</label><input type="email" id="${prefix}-semail" value="${esc(savedEmail)}" placeholder="you@slt.com.lk or you@outlook.com"></div>
+    </div>
+    <div class="form-row" style="margin-top:10px">
+      <label for="${prefix}-spass">Outlook Password / App Password <span class="small muted">(optional &mdash; leave blank to use your Outlook / Mail app)</span></label>
+      <input type="password" id="${prefix}-spass" placeholder="${c.has_smtp_password ? "Saved (leave blank to keep existing password)" : "Optional — leave blank if you don't use SMTP password"}">
+      ${c.has_smtp_password ? `<label class="check" style="margin-top:6px"><input type="checkbox" id="${prefix}-clear-pw"> Clear saved password</label>` : ""}
+    </div>
+    <div id="${prefix}-status-banner" style="margin-top:10px">${statusBanner}</div>
     <details id="${prefix}-adv" style="margin-top:12px" ${openAdv ? "open" : ""}>
-      <summary class="small muted" style="cursor:pointer;user-select:none">Advanced settings (automatic background sending / IT setup)</summary>
+      <summary class="small muted" style="cursor:pointer;user-select:none">Advanced options (delivery mode, Microsoft App ID &amp; custom SMTP server)</summary>
       <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)">
         <div class="form-row">
           <label for="${prefix}-mode">Delivery mode</label>
           <select id="${prefix}-mode">
-            <option value="auto" ${mode === "auto" ? "selected" : ""}>Automatic (Recommended &mdash; Graph if signed in, otherwise Outlook Desktop app)</option>
-            <option value="outlook_app" ${mode === "outlook_app" ? "selected" : ""}>Open in Outlook Desktop / Mail app (no login needed)</option>
-            <option value="eml" ${mode === "eml" ? "selected" : ""}>Save Draft file (.eml) &amp; Outlook Web links (no setup)</option>
-            <option value="graph" ${mode === "graph" || mode === "graph_send" ? "selected" : ""}>Send via Outlook (Microsoft Graph + Upload Session for &gt;3 MB)</option>
-            <option value="graph_draft" ${mode === "graph_draft" ? "selected" : ""}>Save directly to Outlook Drafts (Microsoft Graph + MSAL)</option>
-            <option value="smtp" ${mode === "smtp" ? "selected" : ""}>Office 365 / Outlook SMTP (smtp.office365.com)</option>
+            <option value="auto" ${mode === "auto" ? "selected" : ""}>Automatic (Recommended &mdash; Graph if signed in, SMTP if password saved, else Outlook app)</option>
+            <option value="outlook_app" ${mode === "outlook_app" ? "selected" : ""}>Open / Send with Outlook Desktop or Mail app (no password needed)</option>
+            <option value="eml" ${mode === "eml" ? "selected" : ""}>Save Draft file (.eml) &amp; Outlook Web links</option>
+            <option value="graph" ${mode === "graph" || mode === "graph_send" ? "selected" : ""}>Send via Microsoft Graph (OAuth2 + Upload Session for &gt;3 MB)</option>
+            <option value="graph_draft" ${mode === "graph_draft" ? "selected" : ""}>Save to Outlook Drafts (Microsoft Graph + MSAL)</option>
+            <option value="smtp" ${mode === "smtp" ? "selected" : ""}>Direct Office 365 / Outlook SMTP</option>
           </select>
         </div>
         <div id="${prefix}-graph-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${isGraph ? "" : "display:none"}">
-          <div class="label" style="margin-bottom:6px">Microsoft 365 / Outlook Graph (1-Click Sign-In)</div>
+          <div class="label" style="margin-bottom:6px">Microsoft 365 / Outlook Graph (OAuth2 Sign-In)</div>
           <div class="grid two">
             <div class="form-row" style="margin:0"><label for="${prefix}-client">Application (Client) ID</label><input type="text" id="${prefix}-client" value="${esc(c.client_id)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
             <div class="form-row" style="margin:0"><label for="${prefix}-tenant">Tenant ID</label><input type="text" id="${prefix}-tenant" value="${esc(c.tenant_id || "common")}" placeholder="common"></div>
@@ -326,14 +339,13 @@ function _outlookControlsMarkup(c, prefix = "ol") {
           <div id="${prefix}-auth-box">${authBlock}</div>
         </div>
         <div id="${prefix}-smtp-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${showSmtp ? "" : "display:none"}">
-          <div class="label" style="margin-bottom:6px">Office 365 / Outlook SMTP &amp; Fallback</div>
+          <div class="label" style="margin-bottom:6px">Custom Office 365 SMTP Settings</div>
           <div class="grid two">
             <div class="form-row" style="margin:0"><label for="${prefix}-shost">SMTP Host</label><input type="text" id="${prefix}-shost" value="${esc(c.smtp_host)}" placeholder="smtp.office365.com"></div>
             <div class="form-row" style="margin:0"><label for="${prefix}-sport">SMTP Port</label><input type="text" id="${prefix}-sport" value="${esc(c.smtp_port)}" placeholder="587"></div>
-            <div class="form-row" style="margin:0"><label for="${prefix}-suser">Outlook Email</label><input type="email" id="${prefix}-suser" value="${esc(c.smtp_user)}" placeholder="you@slt.com.lk or you@outlook.com"></div>
-            <div class="form-row" style="margin:0"><label for="${prefix}-spass">Password / App Password</label><input type="password" id="${prefix}-spass" placeholder="${c.has_smtp_password ? "Saved (type to change)" : "Outlook password"}"></div>
           </div>
-          <label class="check" style="margin-top:8px"><input type="checkbox" id="${prefix}-sfallback" ${c.smtp_fallback !== false ? "checked" : ""}> Use Office 365 SMTP automatically as a fallback if Microsoft Graph fails</label>
+          <div class="form-row" style="margin-top:8px"><label for="${prefix}-suser">Custom SMTP Username (only if different from Your Outlook Email)</label><input type="email" id="${prefix}-suser" value="${esc(customSmtpUser)}" placeholder="Same as Your Outlook Email"></div>
+          <label class="check" style="margin-top:6px"><input type="checkbox" id="${prefix}-sfallback" ${c.smtp_fallback !== false ? "checked" : ""}> Use Office 365 SMTP automatically as a fallback if Microsoft Graph fails</label>
         </div>
         <div class="form-row" style="margin-top:12px">
           <label for="${prefix}-test-to">Safe Demo Recipient Override (optional)</label>
@@ -355,18 +367,23 @@ function _syncOutlookModeUI(prefix = "ol") {
 }
 
 function _collectOutlookPayload(prefix = "ol") {
+  const semail = $(`#${prefix}-semail`)?.value.trim() || "";
+  const advUser = $(`#${prefix}-suser`)?.value.trim() || "";
   const p = {
     mode: $(`#${prefix}-mode`).value,
+    from_name: $(`#${prefix}-fname`)?.value.trim() || "HR Hiring Team",
+    sender_email: semail,
     client_id: $(`#${prefix}-client`).value.trim(),
     tenant_id: $(`#${prefix}-tenant`).value.trim() || "common",
     test_recipient: $(`#${prefix}-test-to`).value.trim(),
     smtp_host: $(`#${prefix}-shost`).value.trim(),
     smtp_port: $(`#${prefix}-sport`).value.trim(),
-    smtp_user: $(`#${prefix}-suser`).value.trim(),
+    smtp_user: advUser || semail,
     smtp_use_tls: true,
     smtp_fallback: !!$(`#${prefix}-sfallback`).checked,
   };
-  if ($(`#${prefix}-spass`).value) p.smtp_password = $(`#${prefix}-spass`).value;
+  if ($(`#${prefix}-clear-pw`)?.checked) p.clear_smtp_password = true;
+  else if ($(`#${prefix}-spass`).value) p.smtp_password = $(`#${prefix}-spass`).value;
   return p;
 }
 
@@ -974,12 +991,15 @@ async function pMailSettings() {
     : empty("No attachments yet.");
   const total = s.attachments.reduce((n, f) => n + f.size, 0);
   const eff = _effectiveOutlookMode(ol);
+  const senderAddr = ol.sender_email || ol.account?.username || ol.smtp_user || "";
   const acctText = ol.account?.username
     ? `Connected: ${esc(ol.account.username)}`
-    : eff === "outlook_app"
-    ? "No login needed — opens Outlook / Mail app"
     : eff === "smtp"
-    ? `Office 365 SMTP (${esc(ol.smtp_user || ol.smtp_host)})`
+    ? `Office 365 SMTP (${esc(senderAddr)})`
+    : eff === "outlook_app" && senderAddr
+    ? `Sender: ${esc(senderAddr)} (Outlook / Mail app)`
+    : eff === "outlook_app"
+    ? "Enter your Outlook email below & save"
     : ".eml draft mode";
   setView(`<div class="box">${boxHead("Attachments", `<span class="small muted">${s.attachments.length} file(s), ${fmtSize(total)} in total</span>`)}
       <p class="small muted" style="margin-top:0">These files are attached to every invitation mail. The required files come with the template; add more files here if needed. You can untick a file for a single mail on the candidate page. To update a required file, add a newer file with the same name.</p>
@@ -992,7 +1012,7 @@ async function pMailSettings() {
       <div class="form-row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft)">
         <label for="ms-ol-probe">Send a test email (includes all ${s.attachments.length} attachments)</label>
         <div class="actions">
-          <input type="email" id="ms-ol-probe" style="flex:1" value="${esc(ol.test_recipient || ol.account?.username || ol.smtp_user)}" placeholder="your.email@outlook.com">
+          <input type="email" id="ms-ol-probe" style="flex:1" value="${esc(ol.test_recipient || senderAddr)}" placeholder="your.email@outlook.com">
           <button type="button" class="btn" id="ms-ol-test">Send test mail</button>
           <button type="button" class="btn primary" id="ms-ol-save">Save Outlook settings</button>
         </div>

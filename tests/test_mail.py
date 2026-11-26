@@ -479,3 +479,40 @@ def test_auto_mode_switches_from_desktop_app_to_graph_when_signed_in(mail, monke
     assert res2["invite"]["how"] == "graph"
     assert any(u.endswith("/me/messages/draft-auto-1/send") for u in graph_urls)
 
+
+def test_saving_sender_email_updates_sender_and_enables_easy_smtp_in_auto_mode(mail):
+    from hiring import outlook
+
+    captured: list[tuple] = []
+    outlook.set_smtp_backend(lambda msg, cfg: (captured.append((msg, cfg)), "<easy-smtp-1@slt.com.lk>")[1])
+
+    # 1. Save just Sender Name + Outlook Email (no password) -> updates active sender in /api/mail/settings and .eml From:
+    r = mail.post(
+        "/api/outlook/settings",
+        headers=HR,
+        json={"mode": "auto", "from_name": "Giridaran", "sender_email": "giridaran@slt.com.lk"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["sender_email"] == "giridaran@slt.com.lk"
+    assert r.json()["effective_mode"] == "outlook_app"
+    assert mail.get("/api/mail/settings").json()["sender"] == "Giridaran <giridaran@slt.com.lk>"
+
+    # 2. Add optional password while leaving mode="auto" -> sends automatically via SMTP without setting separate smtp_user
+    launched: list[Path] = []
+    outlook.set_desktop_launcher(lambda p, **kw: (launched.append(p), "Microsoft Outlook")[1])
+    mail.post(
+        "/api/outlook/settings",
+        headers=HR,
+        json={"mode": "auto", "from_name": "Giridaran", "sender_email": "giridaran@slt.com.lk", "smtp_password": "secret"},
+    )
+    assert mail.get("/api/outlook/settings").json()["effective_mode"] == "smtp"
+
+    no = add("arjun_mehta.txt")
+    read_all()
+    sent = mail.post(f"/api/candidates/{no}/mail/send", headers=HR, json={})
+    assert sent.status_code == 200, sent.text
+    inv = sent.json()["invite"]
+    assert inv["how"] == "smtp" and inv["sender"] == "giridaran@slt.com.lk"
+    assert len(captured) == 1 and "giridaran@slt.com.lk" in captured[0][0]["From"]
+    assert len(launched) == 0
+

@@ -156,15 +156,17 @@ POOL_STATUSES = {"in_pool", "no_area"}
 NOT_IN_HIRING = POOL_STATUSES | {"archived"}
 
 # ---- Microsoft Outlook email integration ------------------------------------------
-# Delivery modes: "eml" (outbox .eml + Outlook Web links), "graph" / "graph_send"
-# (direct send via Microsoft Graph draft + attachments + upload session for >3 MB),
-# "graph_draft" (Outlook Drafts via Microsoft Graph), or "smtp" (Office 365 SMTP AUTH).
+# Delivery modes: "auto" (uses Microsoft Graph when signed in, SMTP if configured, otherwise opens
+# ready-to-send draft in Outlook Desktop / Mail app), "outlook_app", "eml", "graph", "graph_draft",
+# "graph_send", or "smtp".
 _RAW_OUTLOOK_MODE = (os.environ.get("HR_OUTLOOK_MODE") or os.environ.get("OUTLOOK_MODE") or "eml").strip().lower()
 OUTLOOK_MODE = (
     _RAW_OUTLOOK_MODE
-    if _RAW_OUTLOOK_MODE in ("eml", "outlook_app", "graph", "graph_draft", "graph_send", "smtp")
+    if _RAW_OUTLOOK_MODE in ("auto", "eml", "outlook_app", "graph", "graph_draft", "graph_send", "smtp")
     else "eml"
 )
+# Optional team-wide Microsoft Entra public Application (Client) ID (no secret required; set here or
+# via HR_OUTLOOK_CLIENT_ID in .env so the supervisor can sign in with a single click without typing IDs).
 OUTLOOK_CLIENT_ID = os.environ.get("HR_OUTLOOK_CLIENT_ID", "").strip()
 OUTLOOK_TENANT_ID = os.environ.get("HR_OUTLOOK_TENANT_ID", "common").strip() or "common"
 OUTLOOK_FROM_NAME = os.environ.get("HR_OUTLOOK_FROM_NAME", "HR Hiring Team").strip()

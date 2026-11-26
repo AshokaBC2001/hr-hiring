@@ -38,7 +38,7 @@ import msal
 
 from . import checks, config, db
 
-VALID_MODES = ("eml", "outlook_app", "graph", "graph_draft", "graph_send", "smtp")
+VALID_MODES = ("auto", "outlook_app", "eml", "graph", "graph_draft", "graph_send", "smtp")
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 SCOPES = ["User.Read", "Mail.ReadWrite", "Mail.Send"]
 MAX_GRAPH_ATTACHMENT_BYTES = 3 * 1024 * 1024
@@ -191,10 +191,25 @@ def raw_settings() -> dict[str, Any]:
     }
 
 
+def effective_mode(cfg: dict[str, Any] | None = None, *, account: dict[str, str] | None = None) -> str:
+    """Resolve 'auto' into 'graph', 'smtp', or 'outlook_app' based on available credentials."""
+    cfg = cfg or raw_settings()
+    mode = cfg.get("mode", "eml")
+    if mode != "auto":
+        return mode
+    acct = account if account is not None else get_signed_in_account(cfg)
+    if acct is not None:
+        return "graph"
+    if cfg.get("smtp_user") and cfg.get("smtp_password"):
+        return "smtp"
+    return "outlook_app"
+
+
 def public_settings() -> dict[str, Any]:
     """Return UI-safe Outlook settings without secrets or cached tokens."""
     cfg = raw_settings()
     acct = get_signed_in_account(cfg)
+    eff = effective_mode(cfg, account=acct)
     with _auth_lock:
         auth_view = dict(_auth_state)
         if acct:
@@ -202,6 +217,7 @@ def public_settings() -> dict[str, Any]:
             auth_view["account"] = acct
     return {
         "mode": cfg["mode"],
+        "effective_mode": eff,
         "client_id": cfg["client_id"],
         "has_client_id": bool(cfg["client_id"]),
         "tenant_id": cfg["tenant_id"],
@@ -416,6 +432,62 @@ def start_device_flow() -> dict[str, Any]:
                 _auth_state.update(status="error", error=str(exc), message=str(exc))
 
     threading.Thread(target=_poll, daemon=True).start()
+    return auth_status()
+
+
+def start_interactive_login() -> dict[str, Any]:
+    """Sign in via 1-click browser window (MSAL interactive flow) with Device Code fallback."""
+    cfg = raw_settings()
+    cache = _load_cache()
+    app = _build_msal_app(cfg, cache)
+    if not hasattr(app, "acquire_token_interactive"):
+        return start_device_flow()
+
+    with _auth_lock:
+        _auth_state.update(
+            status="pending",
+            user_code="",
+            verification_uri="",
+            message="Complete sign-in in the Microsoft browser window that just opened...",
+            expires_at=time.time() + 180,
+            error="",
+            account=None,
+        )
+
+    def _run_interactive() -> None:
+        try:
+            result = app.acquire_token_interactive(scopes=SCOPES, prompt="select_account", timeout=180)
+            _save_cache(cache)
+            if isinstance(result, dict) and "access_token" in result:
+                claims = result.get("id_token_claims") or {}
+                accts = app.get_accounts()
+                username = str((accts[0].get("username") if accts else "") or claims.get("preferred_username") or "")
+                name = str(claims.get("name") or username or "Microsoft Account")
+                with _auth_lock:
+                    _auth_state.update(
+                        status="signed_in",
+                        user_code="",
+                        error="",
+                        message=f"Signed in as {username or name}.",
+                        account={"username": username, "name": name},
+                    )
+            else:
+                err = str((result or {}).get("error_description") or (result or {}).get("error") or "Sign-in was cancelled or timed out.")
+                with _auth_lock:
+                    _auth_state.update(status="error", error=err, message=err)
+        except Exception as exc:
+            msg = str(exc)
+            # Fall back to device code flow if a local browser window cannot be opened
+            if "browser" in msg.lower() or "display" in msg.lower():
+                try:
+                    start_device_flow()
+                    return
+                except Exception:
+                    pass
+            with _auth_lock:
+                _auth_state.update(status="error", error=msg, message=msg)
+
+    threading.Thread(target=_run_interactive, daemon=True).start()
     return auth_status()
 
 
@@ -902,9 +974,9 @@ def deliver_draft(
     attachment_paths: Sequence[Path] | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Dispatch an email using the configured Outlook mode ('eml', 'outlook_app', 'graph', 'graph_draft', 'graph_send', 'smtp')."""
+    """Dispatch an email using the configured Outlook mode ('auto', 'eml', 'outlook_app', 'graph', 'graph_draft', 'graph_send', 'smtp')."""
     cfg = cfg or raw_settings()
-    mode = cfg.get("mode", "eml")
+    mode = effective_mode(cfg)
     if mode == "graph_draft":
         return create_outlook_draft(to_email, to_name, subject, body, attachment=attachment, cfg=cfg)
     if mode in ("graph", "graph_send"):
@@ -975,17 +1047,18 @@ def send_test(target: str) -> dict[str, Any]:
     if not checks.EMAIL_RE.fullmatch(clean_target):
         raise ValueError("Provide a valid target email address to test Outlook delivery.")
     subject = "HR Hiring — Outlook Integration Test"
+    eff_mode = effective_mode(cfg)
     body = (
         "Hello,\n\n"
         "This test confirms your HR Hiring system is connected to Microsoft Outlook.\n\n"
-        f"Configured delivery mode: {cfg['mode']}\n\n"
+        f"Configured delivery mode: {eff_mode}\n\n"
         "Kind regards,\nHiring Team"
     )
-    if cfg["mode"] == "eml":
+    if eff_mode == "eml":
         acct = get_signed_in_account(cfg)
         if acct is not None:
             return create_outlook_draft(clean_target, "HR Test", subject, body, cfg=cfg)
-        raise ValueError("Currently in .eml file mode. Choose Open in Outlook App, Microsoft Graph, or Office 365 SMTP to test Outlook delivery.")
+        raise ValueError("Currently in .eml file mode. Choose Automatic, Open in Outlook App, Microsoft Graph, or Office 365 SMTP to test Outlook delivery.")
     return deliver_draft(clean_target, "HR Test", subject, body, cfg=cfg)
 
 

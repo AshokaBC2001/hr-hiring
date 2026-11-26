@@ -442,3 +442,40 @@ def test_outlook_app_mode_in_mail_only_and_open_route(mail, monkeypatch):
     assert fail.status_code == 400 and "No desktop mail app" in fail.json()["detail"]
     assert (db.get_candidate(no2).invite or {}).get("status") != "sent"
 
+
+def test_auto_mode_switches_from_desktop_app_to_graph_when_signed_in(mail, monkeypatch):
+    from hiring import outlook
+
+    monkeypatch.setattr(config, "OUTLOOK_MODE", "auto")
+    launched: list[Path] = []
+    outlook.set_desktop_launcher(lambda p, **kw: (launched.append(p), "Microsoft Outlook")[1])
+
+    no1 = add("arjun_mehta.txt")
+    read_all()
+    res1 = mail.post(f"/api/candidates/{no1}/mail/send", headers=HR, json={}).json()
+    assert res1["invite"]["how"] == "outlook_app" and len(launched) == 1
+
+    # Sign in with Microsoft -> 'auto' now uses Graph with all 4 attachments automatically
+    class _FakeApp:
+        def get_accounts(self):
+            return [{"username": "supervisor@slt.com.lk", "name": "Supervisor"}]
+
+        def acquire_token_silent(self, scopes, account=None):
+            return {"access_token": "tok-auto"}
+
+    graph_urls: list[str] = []
+
+    def fake_graph(method, url, payload, token, cfg):
+        graph_urls.append(url)
+        return {"id": "draft-auto-1", "webLink": "https://outlook.office.com/mail/id/draft-auto-1"}
+
+    outlook.set_msal_factory(lambda cid, auth, cache: _FakeApp())
+    outlook.set_graph_backend(fake_graph)
+    outlook.save_settings({"mode": "auto", "client_id": "11111111-2222-3333-4444-555555555555"})
+
+    no2 = add("rahul_nair.txt")
+    read_all()
+    res2 = mail.post(f"/api/candidates/{no2}/mail/send", headers=HR, json={}).json()
+    assert res2["invite"]["how"] == "graph"
+    assert any(u.endswith("/me/messages/draft-auto-1/send") for u in graph_urls)
+

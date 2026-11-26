@@ -905,6 +905,15 @@ def start_outlook_auth(request: Request):
         raise actions.ActionError(str(exc)) from exc
 
 
+@app.post("/api/outlook/auth/interactive")
+def start_outlook_interactive(request: Request):
+    _need_role(request, "hr")
+    try:
+        return outlook.start_interactive_login()
+    except outlook.OutlookError as exc:
+        raise actions.ActionError(str(exc)) from exc
+
+
 @app.get("/api/outlook/auth/status")
 def outlook_auth_status():
     return outlook.auth_status()

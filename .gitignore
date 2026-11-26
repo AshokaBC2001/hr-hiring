@@ -8,5 +8,6 @@ screenshots_mail/
 .DS_Store
 .pytest_cache/
 Outlook_Mail_and_Performance_Changes.pdf
+Supervisor_Quick_Start_Guide.pdf
 data/*.db-wal
 data/*.db-shm

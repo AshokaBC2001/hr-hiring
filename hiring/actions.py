@@ -585,8 +585,8 @@ def resend_draft(draft_id: int) -> dict:
         if not eml_path.is_file():
             eml_path.write_bytes(letters.email_file(c, subject, body, attach=attach_bool))
     cfg = outlook.raw_settings()
-    if cfg["mode"] == "eml":
-        raise ActionError("Outlook mode is set to '.eml file only'. Choose Open in Outlook App, Graph Send, Graph Drafts, or Office 365 SMTP in Outlook settings first.")
+    if outlook.effective_mode(cfg) == "eml":
+        raise ActionError("Outlook mode is set to '.eml file only'. Choose Automatic, Open in Outlook App, Graph Send, Graph Drafts, or Office 365 SMTP in Outlook settings first.")
     res = outlook.deliver_draft(
         c.email, c.name or "", subject, body,
         attachment=attach, eml_path=eml_path, attachment_paths=att_paths, cfg=cfg,

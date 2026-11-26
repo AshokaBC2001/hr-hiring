@@ -401,3 +401,43 @@ def test_outlook_app_mode_release_open_and_test(app_client: TestClient):
     assert reopen.status_code == 200
     assert reopen.json()["ok"] is True and reopen.json()["opened_in"] == "Microsoft Outlook"
     assert len(opened) == 3
+
+
+def test_auto_mode_resolution_and_interactive_login(app_client: TestClient):
+    headers_hr = {"x-role": "hr"}
+    app_client.post("/api/outlook/settings", json={"mode": "auto"}, headers=headers_hr)
+    assert app_client.get("/api/outlook/settings").json()["effective_mode"] == "outlook_app"
+
+    # Adding SMTP credentials while in 'auto' resolves effective_mode to 'smtp'
+    app_client.post(
+        "/api/outlook/settings",
+        json={"mode": "auto", "smtp_user": "hr@slt.com.lk", "smtp_password": "app-pw"},
+        headers=headers_hr,
+    )
+    assert app_client.get("/api/outlook/settings").json()["effective_mode"] == "smtp"
+
+    # 1-click interactive login upgrades 'auto' to 'graph'
+    fake_app = _FakeMsalApp(signed_in=False)
+
+    def interactive(scopes, prompt=None, timeout=None, **kwargs):
+        fake_app.signed_in = True
+        return {
+            "access_token": "interactive-token",
+            "id_token_claims": {"preferred_username": fake_app.email_addr, "name": "Supervisor Account"},
+        }
+
+    fake_app.acquire_token_interactive = interactive
+    outlook.set_msal_factory(lambda cid, auth, cache: fake_app)
+    app_client.post(
+        "/api/outlook/settings",
+        json={"mode": "auto", "client_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+        headers=headers_hr,
+    )
+    start = app_client.post("/api/outlook/auth/interactive", headers=headers_hr)
+    assert start.status_code == 200, start.text
+    for _ in range(50):
+        st = app_client.get("/api/outlook/auth/status").json()
+        if st.get("signed_in"):
+            break
+    assert st.get("signed_in") is True
+    assert app_client.get("/api/outlook/settings").json()["effective_mode"] == "graph"

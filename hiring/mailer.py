@@ -131,7 +131,7 @@ def send_mail(
 
     to_header = formataddr((to_name.strip(), recipient_email)) if to_name.strip() else recipient_email
     sender_name, _ = parseaddr(_safe_header(sender))
-    mode = cfg.get("mode", "eml")
+    mode = outlook.effective_mode(cfg)
 
     if mode in ("eml", "outlook_app"):
         fname, mid = _save_eml(sender, to_header, subject, html, text, attachments, name_hint)

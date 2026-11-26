@@ -1,0 +1,14 @@
+To: Oshan Pathirana <oshan.p@example.com>
+Subject: Interview Invitation - APP-0017
+Released: 2026-11-17T23:37:04
+
+Dear Oshan,
+
+We would like to invite you to an interview for the Web Development area. 
+
+This interview is scheduled for Wednesday 18 November 2026 at 11:45.
+
+Please reply to confirm your attendance.
+
+Kind regards,
+Hiring Team

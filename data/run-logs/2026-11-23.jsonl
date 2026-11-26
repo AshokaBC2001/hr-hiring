@@ -1,0 +1,17 @@
+{"at": "2026-11-23T00:30:24", "employee": "Coordinator", "routine": "invite-and-slots", "candidate_id": 16, "seconds": 0.0, "outcome": "ok", "model_calls": 0, "note": "Slot Tuesday 24 November 2026 at 09:30"}
+{"at": "2026-11-23T00:30:24", "employee": "Coordinator", "routine": "prepare-questions", "candidate_id": 16, "seconds": 18.49, "outcome": "fallback", "model_calls": 3, "note": "Last problems: Every question must be a full sentence that ends with a question mark."}
+{"at": "2026-11-23T00:30:43", "employee": "Coordinator", "routine": "invite-and-slots", "candidate_id": 16, "seconds": 4.49, "outcome": "ok", "model_calls": 1, "note": ""}
+{"at": "2026-11-23T00:31:14", "employee": "Onboarding", "routine": "issue-work-id", "candidate_id": 16, "seconds": 0.01, "outcome": "ok", "model_calls": 0, "note": "Work ID 1005"}
+{"at": "2026-11-23T00:31:14", "employee": "Onboarding", "routine": "draft-acceptance", "candidate_id": 16, "seconds": 4.13, "outcome": "ok", "model_calls": 1, "note": ""}
+{"at": "2026-11-23T00:31:18", "employee": "Onboarding", "routine": "placement-letter", "candidate_id": 16, "seconds": 0.1, "outcome": "ok", "model_calls": 0, "note": "Placement_Letter_APP-0016.pdf"}
+{"at": "2026-11-23T00:31:18", "employee": "Onboarding", "routine": "induction-checklist", "candidate_id": 16, "seconds": 0.0, "outcome": "ok", "model_calls": 0, "note": ""}
+{"at": "2026-11-23T00:47:59", "employee": "Coordinator", "routine": "invite-and-slots", "candidate_id": 11, "seconds": 0.06, "outcome": "ok", "model_calls": 0, "note": "Slot Tuesday 24 November 2026 at 10:15"}
+{"at": "2026-11-23T00:47:59", "employee": "Coordinator", "routine": "prepare-questions", "candidate_id": 11, "seconds": 6.98, "outcome": "ok", "model_calls": 1, "note": ""}
+{"at": "2026-11-23T00:48:06", "employee": "Coordinator", "routine": "invite-and-slots", "candidate_id": 11, "seconds": 4.09, "outcome": "ok", "model_calls": 1, "note": ""}
+{"at": "2026-11-23T00:48:30", "employee": "Onboarding", "routine": "issue-work-id", "candidate_id": 11, "seconds": 0.01, "outcome": "ok", "model_calls": 0, "note": "Work ID 1006"}
+{"at": "2026-11-23T00:48:30", "employee": "Onboarding", "routine": "draft-acceptance", "candidate_id": 11, "seconds": 3.97, "outcome": "ok", "model_calls": 1, "note": ""}
+{"at": "2026-11-23T00:48:34", "employee": "Onboarding", "routine": "placement-letter", "candidate_id": 11, "seconds": 0.06, "outcome": "ok", "model_calls": 0, "note": "Placement_Letter_APP-0011.pdf"}
+{"at": "2026-11-23T00:48:34", "employee": "Onboarding", "routine": "induction-checklist", "candidate_id": 11, "seconds": 0.0, "outcome": "ok", "model_calls": 0, "note": ""}
+{"at": "2026-11-23T15:41:52", "employee": "Coordinator", "routine": "invite-and-slots", "candidate_id": 8, "seconds": 0.0, "outcome": "ok", "model_calls": 0, "note": "Slot Tuesday 24 November 2026 at 11:00"}
+{"at": "2026-11-23T15:41:52", "employee": "Coordinator", "routine": "prepare-questions", "candidate_id": 8, "seconds": 7.53, "outcome": "ok", "model_calls": 1, "note": ""}
+{"at": "2026-11-23T15:41:59", "employee": "Coordinator", "routine": "invite-and-slots", "candidate_id": 8, "seconds": 4.18, "outcome": "ok", "model_calls": 1, "note": ""}

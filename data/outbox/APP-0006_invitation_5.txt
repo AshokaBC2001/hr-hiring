@@ -1,0 +1,14 @@
+To: Hiruni Dissanayake <hiruni.d@example.com>
+Subject: Interview Invitation - Flutter Role
+Released: 2026-11-17T23:34:26
+
+Dear Hiruni,
+
+We'd like to invite you to an interview for the Flutter area for application number APP-0006.
+
+The interview is scheduled for Wednesday 18 November 2026 at 11:00.
+
+Please reply to confirm your attendance.
+
+Kind regards,
+Hiring Team

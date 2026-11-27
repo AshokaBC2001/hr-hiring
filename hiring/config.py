@@ -122,6 +122,11 @@ SCHEDULER_ENABLED = os.environ.get("HR_SCHEDULER", "1") != "0"
 MODE = "mail" if os.environ.get("HR_MODE", "full").strip().lower() == "mail" else "full"
 MAIL_ATTACH_TYPES = {".pdf", ".xlsx", ".xls", ".docx", ".doc"}
 MAIL_ATTACH_MAX_BYTES = 10 * 1024 * 1024      # per file
+MAIL_BULK_DELAY_SECONDS = float(os.environ.get("HR_MAIL_BULK_DELAY", "2.5"))   # pause between bulk mails
+MAIL_OUTBOX_KEEP_DAYS = int(os.environ.get("HR_MAIL_OUTBOX_KEEP_DAYS", "90"))  # then sent copies are shrunk
+# Where the mail password is kept: "auto" uses the system keychain when the keyring package is
+# installed (and the local database otherwise); "db" always uses the local database.
+SECRET_STORE = os.environ.get("HR_SECRET_STORE", "auto").strip().lower()
 
 # ---- Statuses: label shown to people, chip colour, who acts next ----------------
 STATUSES = {

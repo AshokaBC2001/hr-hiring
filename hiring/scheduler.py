@@ -37,6 +37,9 @@ def start() -> BackgroundScheduler:
             h, m = plan["daily_at"].split(":")
             s.add_job(flows.run_employee, CronTrigger(hour=int(h), minute=int(m)), args=[key],
                       id=key, name=EMPLOYEES[key])
+    if config.MODE == "mail":                 # shrink old invitation copies in data/outbox once a day
+        from . import invitation
+        s.add_job(invitation.shrink_outbox, IntervalTrigger(hours=24), id="mail-outbox", name="Mail outbox cleanup")
     s.start()
     _scheduler = s
     return s

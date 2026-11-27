@@ -105,7 +105,12 @@ def test_sending_saves_the_mail_with_its_attachments_and_fills_the_register(mail
         invitation.send(no)
     read_all()
     sent = invitation.send(no)
-    assert sent["status"] == "sent" and sent["how"] == "eml"
+    assert sent["status"] == "opened" and sent["how"] == "eml"          # only saved: waits for "I sent it"
+    waiting = invitation.row(db.get_candidate(no))
+    assert waiting["mail_date"] == "" and waiting["status"] == "Opened, not confirmed"
+    with pytest.raises(invitation.MailProblem, match="open in your mail app"):
+        invitation.send(no)
+    assert invitation.confirm_sent(no)["status"] == "sent"
     msg = email.message_from_bytes((db.paths.outbox / sent["file"]).read_bytes(), policy=email.policy.default)
     assert msg["To"] == "Arjun Mehta <arjun.mehta@example.com>" and msg["Subject"].startswith("Software internship")
     html = msg.get_body(("html",)).get_content()
@@ -170,7 +175,7 @@ def test_the_next_reference_number_is_suggested(mail):
     with pytest.raises(invitation.MailProblem, match="status"):
         invitation.save_row(b, {"status": "Maybe"})
     row = invitation.row(db.get_candidate(a))
-    assert (row["nic"], row["tel"], row["laptop"], row["status"]) == ("200012345678", "0771234567", "SERIAL01", "Replied")
+    assert (row["nic"], row["tel"], row["laptop"], row["status"]) == ("200012345678", "077 123 4567", "SERIAL01", "Replied")
 
 
 def test_the_register_exports_to_excel_in_the_sheet_order(mail):
@@ -178,6 +183,7 @@ def test_the_register_exports_to_excel_in_the_sheet_order(mail):
     no = add("arjun_mehta.txt", "Mr.Dinesh")
     read_all()
     invitation.send(no)
+    invitation.confirm_sent(no)
     ws = load_workbook(io.BytesIO(invitation.export_xlsx(invitation.rows()))).active
     assert [c.value for c in ws[1]] == ["No", "Mail date", "Source", "University", "Technology", "Name", "NIC / PP",
                                         "Address / Company", "Vehicle No", "Tel No", "Laptop Serial No", "Status"]
@@ -201,10 +207,12 @@ def test_mail_routes(mail):
     assert mail.post(f"/api/candidates/{no}/mail", headers=HR, json=body).json()["invite"]["status"] == "draft"
     preview = mail.get(f"/api/candidates/{no}/mail/preview").text
     assert '<a href="https://example.com">' in preview and "guide.pdf" in preview
-    assert mail.post(f"/api/candidates/{no}/mail/send", headers=HR, json=body).json()["invite"]["status"] == "sent"
+    assert mail.post(f"/api/candidates/{no}/mail/send", headers=HR, json=body).json()["invite"]["status"] == "opened"
+    assert mail.get("/api/register?show=waiting").json()["counts"]["waiting"] == 1
+    assert mail.post(f"/api/candidates/{no}/mail/confirm", headers=HR).json()["invite"]["status"] == "sent"
     reg = mail.get("/api/register?show=sent").json()
     assert reg["counts"]["sent"] == 1 and reg["rows"][0]["status"] == "Mail sent"
-    assert mail.post(f"/api/candidates/{no}/register", headers=HR, json={"tel": "0771234567"}).json()["register"]["tel"] == "0771234567"
+    assert mail.post(f"/api/candidates/{no}/register", headers=HR, json={"tel": "0771234567"}).json()["register"]["tel"] == "077 123 4567"
     x = mail.get("/api/register.xlsx")
     assert x.status_code == 200 and x.content[:2] == b"PK"
     assert [a["name"] for a in mail.post("/api/mail/attachments/guide.pdf/remove", headers=HR).json()["attachments"]] == REQUIRED
@@ -424,7 +432,7 @@ def test_outlook_app_mode_in_mail_only_and_open_route(mail, monkeypatch):
     sent = mail.post(f"/api/candidates/{no}/mail/send", headers=HR, json={})
     assert sent.status_code == 200, sent.text
     inv = sent.json()["invite"]
-    assert inv["how"] == "outlook_app" and inv["opened_in"] == "Apple Mail" and inv["status"] == "sent"
+    assert inv["how"] == "outlook_app" and inv["opened_in"] == "Apple Mail" and inv["status"] == "opened"
     assert len(launched) == 2 and sorted(p.name for p in launched[1][1]["attachments"]) == sorted(REQUIRED)
 
     reopen = mail.post(f"/api/candidates/{no}/mail/open", headers=HR)

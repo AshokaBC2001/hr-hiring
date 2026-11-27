@@ -1,4 +1,5 @@
-"""Sending a finished mail through Microsoft Outlook (Graph API, Office 365 SMTP, or .eml archive).
+"""Sending a finished mail (mail-only mode): Microsoft Graph, SMTP (Microsoft, Google or any server),
+the computer's mail app, or an .eml archive.
 
 Everything before this (reading the CV, filling the mail, the visit date, the attachments
 and the preview) is done elsewhere. This file receives a finished mail and dispatches it
@@ -9,7 +10,8 @@ according to active Outlook settings in ``hiring.outlook``:
   (using ``createUploadSession`` in 320 KiB-aligned chunks for files >= 3 MiB), and sends it.
   If ``smtp_fallback`` is enabled with Office 365 SMTP credentials, falls back automatically.
 - ``graph_draft``: creates the multi-attachment draft in the user's Outlook Drafts folder.
-- ``smtp``: sends directly over Office 365 STARTTLS SMTP (``smtp.office365.com:587``).
+- ``smtp``: sends over SMTP with the chosen provider preset (Microsoft, Google) or any server,
+  using STARTTLS (587), SSL (465) or no encryption.
 
 In all non-``.eml`` modes, sending is still archived locally as an ``.eml`` file on success,
 while any failure raises ``MailError`` so the candidate register stays unsent.
@@ -102,11 +104,33 @@ def _send_via_smtp(
 ) -> dict:
     smtp_sender = cfg.get("smtp_user") or ""
     if not smtp_sender or not cfg.get("smtp_password"):
-        raise MailError("Enter your Office 365 email and password/app password in Outlook settings first.")
+        raise MailError("Enter your email address and password (or App Password) in Mail settings first.")
     from_hdr = formataddr((_safe_header(sender_display or cfg.get("from_name") or "HR Hiring Team"), smtp_sender))
     to_hdr = formataddr((to_name, recipient_email)) if to_name else recipient_email
     msg = build_message(from_hdr, to_hdr, subject, html, text, attachments, unsent=False)
     return outlook.send_smtp_mime_message(msg, recipient_email, cfg)
+
+
+def _mb(n: int) -> str:
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def check_size(attachments: list[Path], html: str = "", text: str = "", cfg: dict | None = None) -> None:
+    """Stop before sending when the mail is bigger than the mail service accepts.
+
+    Attachments grow by about a third when they are packed into an email (base64), so the
+    packed size is compared with the service's limit."""
+    cfg = cfg or outlook.raw_settings()
+    provider = cfg.get("provider", "custom")
+    limit = outlook.MAIL_SIZE_LIMITS.get(provider, outlook.MAIL_SIZE_LIMITS["custom"])
+    raw = sum(p.stat().st_size for p in attachments if p.exists())
+    packed = raw * 4 // 3 + len(html or "") + len(text or "") + 4096
+    if packed > limit:
+        who = outlook.PROVIDER_NAMES.get(provider, "Your mail service")
+        raise MailError(
+            f"The attachments add up to {_mb(raw)} (about {_mb(packed)} once packed into the email). "
+            f"{who} accepts mails up to about {_mb(limit)}. Untick an attachment or use a smaller file."
+        )
 
 
 def send_mail(
@@ -125,6 +149,7 @@ def send_mail(
 
     to_name, parsed_email = parseaddr(_safe_header(to))
     cfg = outlook.raw_settings()
+    check_size(attachments, html, text, cfg)
     recipient_email = _safe_header(cfg.get("test_recipient") or parsed_email or to)
     if not checks.EMAIL_RE.fullmatch(recipient_email):
         raise MailError(f'Recipient email "{recipient_email}" is not a valid email address.')
@@ -144,7 +169,7 @@ def send_mail(
         fname, mid = _save_eml(effective_from, to_header, subject, html, text, attachments, name_hint)
         if mode == "outlook_app":
             try:
-                opened_in = outlook.open_eml_in_desktop_app(
+                launched = outlook.launch_desktop_mail(
                     db.paths.outbox / fname,
                     sender_email=effective_sender_addr,
                     to_email=recipient_email,
@@ -162,7 +187,10 @@ def send_mail(
                 "message_id": mid,
                 "sent_to": recipient_email,
                 "sender": effective_sender_addr or effective_from,
-                "opened_in": opened_in,
+                "opened_in": launched["app"],
+                "sent_by_app": launched["sent"],     # classic Outlook sent it by itself
+                "saved_only": launched["saved_only"],  # no app could open it: download the .eml
+                "note": launched["note"],
             }
         return {"how": "eml", "file": fname, "message_id": mid, "sent_to": recipient_email, "sender": effective_from}
 
@@ -207,14 +235,14 @@ def send_mail(
                     "fallback_from": "graph",
                 }
             raise MailError(
-                f"Outlook Graph failed ({graph_err}) and Office 365 SMTP fallback failed ({smtp_res.get('error', '')})."
+                f"Outlook Graph failed ({graph_err}) and the SMTP fallback failed ({smtp_res.get('error', '')})."
             )
         raise MailError(graph_err)
 
     if mode == "smtp":
         smtp_res = _send_via_smtp(sender_name, to_name, recipient_email, subject, html, text, attachments, cfg)
         if not smtp_res.get("ok"):
-            raise MailError(smtp_res.get("error") or "Office 365 SMTP delivery failed.")
+            raise MailError(smtp_res.get("error") or "SMTP delivery failed.")
         eml_sender = formataddr((sender_name or cfg.get("from_name") or "HR Hiring Team", cfg["smtp_user"]))
         fname, _ = _save_eml(eml_sender, to_header, subject, html, text, attachments, name_hint)
         return {

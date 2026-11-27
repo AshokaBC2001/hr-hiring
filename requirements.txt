@@ -12,4 +12,5 @@ fpdf2>=2.7            # placement letter PDF (py-pdf/fpdf2)
 openpyxl>=3.1         # Excel export of the intern register
 msal>=1.31            # Microsoft Outlook OAuth2 (AzureAD/microsoft-authentication-library-for-python)
 certifi>=2024.0
+keyring>=24            # mail-only mode: keeps the mail password in the system keychain (optional)
 pytest>=8

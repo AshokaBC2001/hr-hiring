@@ -83,32 +83,96 @@ If you see "permission denied", run `bash start_model.sh` and `bash start_app.sh
 
 For testing the invitation mail on its own. Start the app with `./start_mail.sh` in terminal 2
 (instead of `./start_app.sh`). On Windows, run `set HR_MODE=mail` and then start the app as usual.
-The model is still needed, because the Recruiter reads each CV.
+The model is used to read each CV. If it is not running, you can still type a student's details by hand.
 
 The menu then shows only three pages:
 
 | Page | What it does |
 |---|---|
-| **Add CV** | Upload CVs and type the **Source** (who sent them). The Recruiter reads the name, email, university and area. |
-| **Register** | One row per CV, in the same columns as the section's intern sheet, with **Export to Excel**. |
-| **Mail settings** | The required attachments (come with the template), extra attachments you add, and the mail template. |
+| **Add CV** | Upload CVs and type the **Source** (who sent them). The Recruiter reads the name, email, university and area. **Add a student without a CV** adds a student by hand (no CV file, or the model is not running). |
+| **Register** | One row per CV, in the same columns as the section's intern sheet. Filter by mail date, status and source, then **Export to Excel** or **Export CSV** (the exports use the filters). Tick students to send them the invitation together. |
+| **Mail settings** | The attachments, how mails are sent (email provider, password, test inbox), the saved mail copies and the mail template. |
 
 On each candidate page:
 
 1. **Invitation mail:** filled from the template. Pick the **visit date** (the next Tuesday is suggested); it is
    written into the mail as `29-DEC-2026  (Tuesday)`. The subject, the text and the attachments can all be edited.
-2. **Preview** shows the mail as the student will see it, with clickable links. **Send mail** hands it over
-   for sending; the register gets the mail date and the status "Mail sent".
-3. **Register details:** after the student replies, fill NIC / PP, Tel No and Laptop Serial No, choose a status,
-   and give the reference number. The next number is suggested from the last one used.
+   Gmail and Outlook-on-the-web links are offered too, for writing the mail yourself (text only, add the attachments by hand).
+2. **Preview** shows the mail as the student will see it, with clickable links. **Send mail** hands it over for sending:
+   - When the mail really goes out (Microsoft sign-in, SMTP, or classic Outlook sending it by itself), the register
+     gets the mail date and the status "Mail sent".
+   - When the mail only **opens** in Outlook / Apple Mail, is saved to Outlook Drafts or is saved as an `.eml` file,
+     it waits as **"Opened, not confirmed"**. Send it from your mail app, then click **I sent it**. If you did not send
+     it, click **Not sent: edit mail** to go back to a draft.
+   - If sending fails, the error is shown on the mail and you can try again. A sent mail can be sent again with
+     **Resend**. Every try is kept in the mail's **Send history**.
+3. **Register details:** after the student replies, open **Paste the student's reply** and click
+   **Fill the details from the reply**: the NIC, phone, laptop serial and similar details are filled in and marked
+   (the AI only adds text that is really in the reply). Check them, choose a status, give the reference number
+   (the next number is suggested) and click **Save details**. Nothing is saved before that.
+   - **NIC / PP** must be a valid old NIC (9 digits and V or X) or new NIC (12 digits), or a passport number.
+     The birth year read from the NIC is shown under the field. The same NIC cannot be saved for two students.
+   - **Tel No** is checked and written as `077 123 4567` (numbers from other countries keep their `+` code).
+   - **Vehicle No** only gives a warning when it does not look like a Sri Lankan number plate.
+4. **Not read yet:** when the model is not running (or the Recruiter could not read the CV), click
+   **Enter details by hand**. The email is filled in from the CV text when it can be found.
 
-**Sending:** `hiring/mailer.py` (backed by `hiring/outlook.py`) handles Outlook delivery:
-- **Automatic mode (`auto`, default on `Start_HR_Mail.command`, `./start_mail.sh`, and `./start_app.sh`):** Uses 1-click browser **Microsoft Graph** if signed in, **Office 365 SMTP** if SMTP credentials are set, or automatically opens **Outlook Desktop / Apple Mail** (`outlook_app`) with zero setup or passwords needed (see [SUPERVISOR_GUIDE.md](SUPERVISOR_GUIDE.md)).
-- **Open in Outlook Desktop / Mail app (`outlook_app`):** Zero Azure setup or passwords — clicking Send creates the draft with all 4 attachments, archives an `.eml` in `data/outbox/`, and opens it right inside Outlook Desktop / Apple Mail so you just click **Send**.
-- **Microsoft Graph (`graph` mode):** Signs in via Microsoft OAuth 2.0 Device Code Flow (`msal`), creates a draft (`POST /v1.0/me/messages`), attaches every file one by one (automatically switching to `createUploadSession` in 320 KiB-aligned chunks for files $\ge 3\text{ MB}$ such as `individual user manual.pdf`), and sends (`POST /v1.0/me/messages/{id}/send`).
-- **Office 365 SMTP fallback (`smtp.office365.com:587`):** Automatically falls back to Office 365 STARTTLS SMTP if Graph fails and SMTP credentials are saved (or can be selected directly in **Mail settings → Outlook sending**).
-- **`.eml` archive (`eml` mode):** Saves an Outlook-ready `.eml` file in `data/outbox/` with all attachments inside (double-click it to open in Mail or Outlook). Sent mails in `outlook_app`/`graph`/`smtp` modes are also archived to `data/outbox/`.
-- **Real test send:** Configure Outlook on **Mail settings**, enter a test inbox email, and click **Send test mail** (or run `.venv/bin/python run.py mail-test --target <email>`).
+**Several invitations at once:** on the **Register** page, tick the students who have not been mailed and click
+**Prepare invitations**. Choose one visit date and the attachments. Students who were already mailed, have no email,
+or are still being read are left out.
+- With Microsoft sign-in or an SMTP password, the mails are sent one after another, a few seconds apart, and the
+  window shows how many were sent.
+- With the Outlook / Mail app, **Open next** opens the mails one at a time. Send each one, then click
+  **I sent them all**.
+
+**Test inbox:** when **Safe Demo Recipient Override** is set in Mail settings, a red banner is shown on every page and
+the button reads **Send to TEST inbox**. Mails sent to the test inbox never change the register.
+
+**Sending:** `hiring/mailer.py` (backed by `hiring/outlook.py`) sends the mail. In **Mail settings → Mail sending**,
+enter your email and choose the **Email provider** (any email domain works; **Detect** suggests the provider from the
+address):
+
+| Provider | How mails are sent |
+|---|---|
+| **Microsoft** (Outlook, Microsoft 365, Outlook.com) | With a password: SMTP through `smtp.office365.com:587` (STARTTLS). With Microsoft sign-in (Advanced options): Microsoft Graph. With neither: your Outlook / Mail app. |
+| **Google** (Gmail, Google Workspace) | With a Google **App Password** (Google Account → Security → 2-Step Verification → App passwords): SMTP through `smtp.gmail.com:587`. Without it: your mail app. A Google Workspace admin can turn App Passwords off. |
+| **Other mail server** | SMTP with the server name, port and security your IT team gives you: STARTTLS (usually 587), SSL (usually 465) or none. |
+| **Outlook or Mail app on this computer** | Always opens the mail in Outlook Desktop / Apple Mail. No password is stored. |
+
+- **Automatic mode (`auto`, default on `Start_HR_Mail.command`, `./start_mail.sh`, and `./start_app.sh`):** Uses 1-click
+  browser **Microsoft Graph** if signed in (Microsoft provider only), **SMTP** if a password is saved, or opens
+  **Outlook Desktop / Apple Mail** (`outlook_app`) with no setup (see [SUPERVISOR_GUIDE.md](SUPERVISOR_GUIDE.md)).
+- **Open in Outlook Desktop / Mail app (`outlook_app`):** clicking Send makes the mail with all its attachments, keeps an
+  `.eml` copy in `data/outbox/`, and opens it in Outlook Desktop / Apple Mail. **New Outlook** cannot open ready-to-send
+  drafts: on a Mac the mail opens in Apple Mail instead; on Windows you are asked to download the `.eml`, or to use
+  Microsoft sign-in or SMTP. **Open again** only opens the mail; it never sends it by itself.
+- **Microsoft Graph (`graph` mode):** Signs in via Microsoft OAuth 2.0 (`msal`), creates a draft (`POST /v1.0/me/messages`),
+  attaches every file one by one (switching to `createUploadSession` in 320 KiB-aligned chunks for files
+  $\ge 3\text{ MB}$ such as `individual user manual.pdf`), and sends (`POST /v1.0/me/messages/{id}/send`).
+- **SMTP fallback:** Falls back to SMTP if Graph fails and a password is saved.
+- **`.eml` archive (`eml` mode):** Saves a ready-to-open `.eml` file in `data/outbox/` with all attachments inside. Mails
+  sent in the other modes are also kept in `data/outbox/`.
+- **Login errors** are explained for each provider (for example, Google asks for an App Password, and Microsoft may
+  have SMTP sign-in switched off for your account).
+- **Size check:** sending stops before it starts when the attachments are too big for the provider (about 35 MB for
+  Microsoft and Google, 25 MB for other servers, after the attachments are packed into the mail). The Attachments box
+  shows the total.
+- **Password:** kept in the computer's keychain (macOS Keychain, Windows Credential Manager) when the `keyring` package
+  is installed (it is in `requirements.txt`), otherwise in the local database. Mail settings shows where it is kept.
+- **Real test send:** in **Mail settings**, enter a test inbox email and click **Send test mail** (or run
+  `.venv/bin/python run.py mail-test --target <email>`).
+
+**Saved mail copies:** a copy of every invitation is kept in `data/outbox/`. Once a day, copies of sent mails older than
+90 days are made smaller: the attachments are taken out and their names are kept in the text. Mails that are not
+confirmed as sent are never changed. **Shrink old copies now** (Mail settings) does it straight away.
+
+Settings for mail-only mode (in `.env` or the environment):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `HR_MAIL_BULK_DELAY` | `2.5` | Seconds between mails when several invitations are sent at once. |
+| `HR_MAIL_OUTBOX_KEEP_DAYS` | `90` | Sent mail copies older than this are made smaller. |
+| `HR_SECRET_STORE` | `auto` | `auto` keeps the password in the keychain when `keyring` is installed; `db` always uses the local database. |
 
 The template is `shared/mail/invitation.txt` and the subject and sender are in `shared/mail/mail.json`.
 The four required attachments (Hospital_system.pdf, individual user manual.pdf, POS Task Backlog.xlsx and

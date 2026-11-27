@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import smtplib
+import socket
 import ssl
 import subprocess
 import sys
@@ -39,6 +40,17 @@ import msal
 from . import checks, config, db
 
 VALID_MODES = ("auto", "outlook_app", "eml", "graph", "graph_draft", "graph_send", "smtp")
+# Mail-only mode: which mail service the sender's address belongs to. Any email domain works.
+PROVIDERS = ("microsoft", "google", "custom", "desktop")
+SMTP_SECURITY = ("starttls", "ssl", "none")
+SMTP_PRESETS = {
+    "microsoft": {"smtp_host": "smtp.office365.com", "smtp_port": 587, "smtp_security": "starttls"},
+    "google": {"smtp_host": "smtp.gmail.com", "smtp_port": 587, "smtp_security": "starttls"},
+}
+PROVIDER_NAMES = {"microsoft": "Microsoft", "google": "Google", "custom": "Your mail server", "desktop": "Your mail app"}
+# Largest whole mail (attachments after email encoding) each service accepts.
+MAIL_SIZE_LIMITS = {"microsoft": 35 * 1024 * 1024, "google": 35 * 1024 * 1024, "custom": 25 * 1024 * 1024,
+                    "desktop": 35 * 1024 * 1024}
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 SCOPES = ["User.Read", "Mail.ReadWrite", "Mail.Send"]
 MAX_GRAPH_ATTACHMENT_BYTES = 3 * 1024 * 1024
@@ -67,6 +79,9 @@ _graph_backend: Callable[[str, str, dict[str, Any], str, dict[str, Any]], dict[s
 _smtp_backend: Callable[[EmailMessage, dict[str, Any]], str] | None = None
 _msal_factory: Callable[[str, str, msal.SerializableTokenCache], Any] | None = None
 _desktop_launcher: Callable[..., str] | None = None
+_mx_resolver: Callable[[str], list[str]] | None = None
+_secret_store: Any = None          # tests inject an in-memory store; otherwise keyring when installed
+_secret_cache: dict[str, str] = {}
 
 _auth_lock = threading.Lock()
 _auth_state: dict[str, Any] = {
@@ -104,6 +119,95 @@ def set_desktop_launcher(fn: Callable[..., str] | None) -> None:
     """Inject a desktop mail launcher stub in tests: ``fn(eml_path, **kwargs) -> app_name``."""
     global _desktop_launcher
     _desktop_launcher = fn
+
+
+def set_mx_resolver(fn: Callable[[str], list[str]] | None) -> None:
+    """Inject an MX lookup stub in tests: ``fn(domain) -> [mail server host names]``."""
+    global _mx_resolver
+    _mx_resolver = fn
+
+
+def set_secret_store(store: Any) -> None:
+    """Inject a password store in tests (an object with get/set/delete), or None for the default."""
+    global _secret_store
+    _secret_store = store
+    _secret_cache.clear()
+
+
+class _KeyringStore:
+    """The system keychain (macOS Keychain, Windows Credential Manager) through the keyring package."""
+
+    def __init__(self, keyring_mod: Any):
+        self._k = keyring_mod
+        self._service = "HR Hiring mail"
+
+    def _account(self, key: str) -> str:
+        return f"{key}:{db.paths.data.resolve()}"
+
+    def get(self, key: str) -> str | None:
+        return self._k.get_password(self._service, self._account(key))
+
+    def set(self, key: str, value: str) -> None:
+        self._k.set_password(self._service, self._account(key), value)
+
+    def delete(self, key: str) -> None:
+        try:
+            self._k.delete_password(self._service, self._account(key))
+        except Exception:
+            pass
+
+
+def _secrets() -> Any:
+    """The password store to use, or None to keep the password in the local database."""
+    if _secret_store is not None:
+        return _secret_store
+    if config.SECRET_STORE == "db":
+        return None
+    try:
+        import keyring  # optional dependency
+        from keyring.backends import fail
+
+        if isinstance(keyring.get_keyring(), fail.Keyring):
+            return None
+        return _KeyringStore(keyring)
+    except Exception:
+        return None
+
+
+def _read_secret(key: str) -> str:
+    if key in _secret_cache:
+        return _secret_cache[key]
+    store = _secrets()
+    value = ""
+    if store is not None:
+        try:
+            value = store.get(key) or ""
+        except Exception:
+            value = ""
+    _secret_cache[key] = value
+    return value
+
+
+def _store_password(password: str) -> None:
+    """Keep the SMTP password in the system keychain when possible, otherwise in the database."""
+    _secret_cache.pop("smtp_password", None)
+    store = _secrets()
+    if password and store is not None:
+        try:
+            store.set("smtp_password", password)
+            db.set_setting("outlook_smtp_password", "")
+            db.set_setting("outlook_smtp_password_store", "keychain")
+            _secret_cache["smtp_password"] = password
+            return
+        except Exception:
+            pass
+    if store is not None and not password:
+        try:
+            store.delete("smtp_password")
+        except Exception:
+            pass
+    db.set_setting("outlook_smtp_password", password)
+    db.set_setting("outlook_smtp_password_store", "database" if password else "")
 
 
 def reset_auth_state() -> None:
@@ -177,10 +281,25 @@ def raw_settings() -> dict[str, Any]:
     sender_email = saved_sender or smtp_user
     if sender_email and not smtp_user:
         smtp_user = sender_email
-    smtp_password = db.get_setting("outlook_smtp_password") or config.OUTLOOK_SMTP_PASSWORD
+    password_store = db.get_setting("outlook_smtp_password_store")
+    if password_store == "keychain":
+        smtp_password = _read_secret("smtp_password") or config.OUTLOOK_SMTP_PASSWORD
+    else:
+        smtp_password = db.get_setting("outlook_smtp_password") or config.OUTLOOK_SMTP_PASSWORD
     smtp_use_tls = _parse_bool(db.get_setting("outlook_smtp_use_tls"), config.OUTLOOK_SMTP_USE_TLS)
     smtp_fallback = _parse_bool(db.get_setting("outlook_smtp_fallback"), config.OUTLOOK_SMTP_FALLBACK)
+    smtp_security = db.get_setting("outlook_smtp_security").strip().lower()
+    if smtp_security not in SMTP_SECURITY:
+        smtp_security = "ssl" if smtp_port == 465 else ("starttls" if smtp_use_tls else "none")
+    provider = db.get_setting("outlook_provider").strip().lower()
+    provider_chosen = provider in PROVIDERS        # picked on the Mail settings page (mail-only mode)
+    if not provider_chosen:
+        provider = _provider_from_host(smtp_host)
     return {
+        "provider": provider,
+        "provider_chosen": provider_chosen,
+        "smtp_security": smtp_security,
+        "password_store": password_store if smtp_password else "",
         "mode": mode,
         "client_id": client_id,
         "tenant_id": tenant_id,
@@ -196,13 +315,26 @@ def raw_settings() -> dict[str, Any]:
     }
 
 
+def _provider_from_host(host: str) -> str:
+    h = (host or "").strip().lower()
+    if not h or h.endswith("office365.com") or h.endswith("outlook.com"):
+        return "microsoft"
+    if h.endswith("gmail.com") or h.endswith("google.com") or h.endswith("googlemail.com"):
+        return "google"
+    return "custom"
+
+
 def effective_mode(cfg: dict[str, Any] | None = None, *, account: dict[str, str] | None = None) -> str:
     """Resolve 'auto' into 'graph', 'smtp', or 'outlook_app' based on available credentials."""
     cfg = cfg or raw_settings()
     mode = cfg.get("mode", "eml")
     if mode != "auto":
         return mode
-    acct = account if account is not None else get_signed_in_account(cfg)
+    provider = cfg.get("provider", "microsoft") if cfg.get("provider_chosen") else "microsoft"
+    if provider == "desktop":
+        return "outlook_app"
+    # Once a Google or other mail server is chosen, the Microsoft sign-in (Graph) is not used.
+    acct = (account if account is not None else get_signed_in_account(cfg)) if provider == "microsoft" else None
     if acct is not None:
         return "graph"
     if cfg.get("smtp_user") and cfg.get("smtp_password"):
@@ -223,6 +355,11 @@ def public_settings() -> dict[str, Any]:
     return {
         "mode": cfg["mode"],
         "effective_mode": eff,
+        "provider": cfg["provider"],
+        "provider_chosen": cfg["provider_chosen"],
+        "smtp_security": cfg["smtp_security"],
+        "password_store": cfg["password_store"],
+        "size_limit": MAIL_SIZE_LIMITS.get(cfg["provider"], MAIL_SIZE_LIMITS["custom"]),
         "client_id": cfg["client_id"],
         "has_client_id": bool(cfg["client_id"]),
         "tenant_id": cfg["tenant_id"],
@@ -290,6 +427,34 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     smtp_use_tls = _parse_bool(payload.get("smtp_use_tls"), cur["smtp_use_tls"])
     smtp_fallback = _parse_bool(payload.get("smtp_fallback"), cur["smtp_fallback"])
 
+    # Mail-only mode sends the provider (Microsoft, Google, other server or the mail app) and the
+    # SMTP security. The full-mode Outlook dialog does not, so its settings are kept as they were.
+    provider = cur["provider"] if cur.get("provider_chosen") else ""
+    if "provider" in payload:
+        provider = str(payload.get("provider") or "").strip().lower()
+        if provider not in PROVIDERS:
+            raise ValueError(f"Unknown email provider '{provider}'. Choose one of: {', '.join(PROVIDERS)}.")
+    smtp_security = cur["smtp_security"]
+    if "smtp_security" in payload:
+        smtp_security = str(payload.get("smtp_security") or "").strip().lower()
+        if smtp_security not in SMTP_SECURITY:
+            raise ValueError("SMTP security must be STARTTLS, SSL or none.")
+    elif "smtp_use_tls" in payload and smtp_security != "ssl":
+        smtp_security = "starttls" if smtp_use_tls else "none"
+    if provider in SMTP_PRESETS:
+        preset = SMTP_PRESETS[provider]
+        smtp_host = preset["smtp_host"]
+        if provider != cur["provider"] or not cur.get("provider_chosen"):
+            smtp_port, smtp_security = preset["smtp_port"], preset["smtp_security"]
+    if provider == "desktop":
+        mode = "outlook_app"
+    elif "provider" in payload and mode == "outlook_app" and cur["provider"] == "desktop":
+        mode = "auto"
+    if "provider" in payload or "smtp_security" in payload:
+        smtp_use_tls = smtp_security == "starttls"
+    if provider == "custom" and smtp_password and "smtp_host" in payload and not str(payload.get("smtp_host") or "").strip():
+        raise ValueError("Enter the SMTP server name of your mail service.")
+
     if mode in ("graph", "graph_draft", "graph_send") and not client_id:
         raise ValueError("Enter the Azure / Entra Application (Client) ID before choosing Microsoft Graph mode.")
     if mode == "smtp" and (not smtp_user or not smtp_password):
@@ -307,9 +472,13 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     db.set_setting("outlook_smtp_host", smtp_host)
     db.set_setting("outlook_smtp_port", str(smtp_port))
     db.set_setting("outlook_smtp_user", smtp_user)
-    db.set_setting("outlook_smtp_password", smtp_password)
+    _store_password(smtp_password)
     db.set_setting("outlook_smtp_use_tls", "1" if smtp_use_tls else "0")
     db.set_setting("outlook_smtp_fallback", "1" if smtp_fallback else "0")
+    if provider:
+        db.set_setting("outlook_provider", provider)
+    if "provider" in payload or "smtp_security" in payload:
+        db.set_setting("outlook_smtp_security", smtp_security)
     return public_settings()
 
 
@@ -929,12 +1098,63 @@ def send_smtp_email(
         }
 
 
+def smtp_open(cfg: dict[str, Any]) -> smtplib.SMTP:
+    """Connect to the SMTP server with the chosen security: STARTTLS (587), SSL (465) or none."""
+    host, port = cfg["smtp_host"], int(cfg["smtp_port"])
+    security = cfg.get("smtp_security") or ("starttls" if cfg.get("smtp_use_tls", True) else "none")
+    if security == "ssl":
+        srv: smtplib.SMTP = smtplib.SMTP_SSL(host, port, timeout=config.OUTLOOK_TIMEOUT, context=_tls_context())
+        srv.ehlo()
+        return srv
+    srv = smtplib.SMTP(host, port, timeout=config.OUTLOOK_TIMEOUT)
+    srv.ehlo()
+    if security == "starttls":
+        srv.starttls(context=_tls_context())
+        srv.ehlo()
+    return srv
+
+
+def smtp_error_text(exc: Exception, cfg: dict[str, Any]) -> str:
+    """A plain explanation of an SMTP failure, written for the person sending the mail."""
+    provider = cfg.get("provider", "custom")
+    host, port = cfg.get("smtp_host", ""), cfg.get("smtp_port", "")
+    detail = re.sub(r"\s+", " ", str(exc)).strip()[:200]
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        if provider == "google":
+            text = ("Google did not accept the email and App Password. Use a 16-letter App Password "
+                    "(Google Account > Security > 2-Step Verification > App passwords), not your normal password. "
+                    "Your Google Workspace admin may have turned App Passwords off.")
+        elif provider == "microsoft":
+            text = ("Microsoft did not accept the email and password. Your organisation may have switched off "
+                    "SMTP sign-in (SMTP AUTH) for your account. Choose 'Outlook or Mail app on this computer' "
+                    "instead, or ask IT to allow SMTP AUTH.")
+        else:
+            text = "The mail server did not accept the email and password. Check them with your IT team."
+        return f"{text} (Server said: {detail})"
+    if isinstance(exc, smtplib.SMTPSenderRefused):
+        return (f"The mail server refused the sender address {exc.sender!s}. The From address must be your own "
+                f"account, or an alias your account may send as. (Server said: {detail})")
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        return f"The mail server refused the student's address. Check the email address. (Server said: {detail})"
+    if isinstance(exc, smtplib.SMTPDataError) and exc.smtp_code == 552:
+        return f"The mail is too big for the mail server. Untick an attachment and try again. (Server said: {detail})"
+    if isinstance(exc, socket.gaierror):
+        return f"Could not find the mail server '{host}'. Check the server name."
+    if isinstance(exc, ssl.SSLError) or isinstance(exc, smtplib.SMTPNotSupportedError):
+        return ("The secure connection to the mail server failed. Use STARTTLS with port 587, "
+                f"or SSL with port 465. (Details: {detail})")
+    if isinstance(exc, (ConnectionError, TimeoutError, socket.timeout, smtplib.SMTPServerDisconnected)):
+        return (f"Could not connect to {host}:{port}. Check the port and security "
+                f"(587 = STARTTLS, 465 = SSL) and your internet connection. (Details: {detail})")
+    return detail or "The mail could not be sent."
+
+
 def send_smtp_mime_message(
     msg: EmailMessage,
     recipient: str,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Send a complete multi-attachment EmailMessage via Office 365 / Outlook SMTP AUTH."""
+    """Send a complete multi-attachment EmailMessage over SMTP (Microsoft, Google or another server)."""
     cfg = cfg or raw_settings()
     clean_recipient = _safe_header(recipient)
     sender_email = _safe_header(cfg.get("smtp_user") or "")
@@ -946,17 +1166,13 @@ def send_smtp_mime_message(
             "sent_to": clean_recipient,
             "message_id": "",
             "web_link": "",
-            "error": "Office 365 SMTP username is empty.",
+            "error": "The SMTP username (your email address) is empty.",
         }
     try:
         if _smtp_backend is not None:
             out_id = _smtp_backend(msg, cfg) or msg_id
         else:
-            with smtplib.SMTP(cfg["smtp_host"], int(cfg["smtp_port"]), timeout=config.OUTLOOK_TIMEOUT) as srv:
-                srv.ehlo()
-                if cfg.get("smtp_use_tls", True):
-                    srv.starttls(context=_tls_context())
-                    srv.ehlo()
+            with smtp_open(cfg) as srv:
                 if cfg.get("smtp_user") and cfg.get("smtp_password"):
                     srv.login(cfg["smtp_user"], cfg["smtp_password"])
                 srv.send_message(msg)
@@ -976,7 +1192,7 @@ def send_smtp_mime_message(
             "sent_to": clean_recipient,
             "message_id": "",
             "web_link": "",
-            "error": str(exc),
+            "error": smtp_error_text(exc, cfg),
         }
 
 
@@ -1094,6 +1310,8 @@ def compose_links(to_email: str, subject: str, body: str, test_recipient: str = 
         "outlook_office": f"https://outlook.office.com/mail/deeplink/compose?{params}",
         "outlook_live": f"https://outlook.live.com/mail/0/deeplink/compose?{params}",
         "mailto": f"mailto:{quote(target)}?{urlencode({'subject': clean_subj, 'body': clean_body}, quote_via=quote)}",
+        "gmail": "https://mail.google.com/mail/?" + urlencode(
+            {"view": "cm", "fs": "1", "to": target, "su": clean_subj, "body": clean_body}, quote_via=quote),
     }
 
 
@@ -1286,3 +1504,170 @@ def open_eml_in_desktop_app(
         raise OutlookError("No desktop mail launcher found. Download the .eml file instead.")
     subprocess.Popen([opener, path_str], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return "Desktop Mail"
+
+
+# ---- Mail-only mode: desktop mail app, New Outlook and provider detection -----------------
+# The classic Outlook script, but it reports back whether Outlook sent the mail ("sent") or only
+# opened it for the person to send ("opened"). With auto_send off it always only opens the mail.
+_MAIL_OUTLOOK_SCRIPT = _CLASSIC_OUTLOOK_SCRIPT.replace(
+    "        if matchedAcc is not missing value then\n            send msg\n        else\n            open msg\n            activate\n        end if\n",
+    "        if matchedAcc is not missing value and autoSend is \"1\" then\n            send msg\n            return \"sent\"\n"
+    "        else\n            open msg\n            activate\n            return \"opened\"\n        end if\n",
+).replace(
+    "    set senderEmail to item 5 of argv\n",
+    "    set senderEmail to item 5 of argv\n    set autoSend to item 6 of argv\n",
+).replace("repeat with i from 6 to (count of argv)", "repeat with i from 7 to (count of argv)")
+_MAIL_SCRIPT_OK = 'return "sent"' in _MAIL_OUTLOOK_SCRIPT and "item 6 of argv" in _MAIL_OUTLOOK_SCRIPT
+
+_WINDOWS_OUTLOOK_OPEN_PS = _WINDOWS_OUTLOOK_PS.replace("$mail.Send()", "$mail.Display()")
+
+
+def _is_new_outlook() -> bool:
+    """True when the computer uses 'New Outlook', which cannot be scripted or open ready-to-send .eml drafts."""
+    try:
+        if sys.platform == "darwin":
+            r = subprocess.run(["defaults", "read", "com.microsoft.Outlook", "IsRunningNewOutlook"],
+                               capture_output=True, text=True, check=False, timeout=5)
+            return r.returncode == 0 and r.stdout.strip() == "1"
+        if sys.platform == "win32":
+            r = subprocess.run(["reg", "query", r"HKCU\Software\Microsoft\Office\16.0\Outlook\Preferences",
+                                "/v", "UseNewOutlook"], capture_output=True, text=True, check=False, timeout=5)
+            return r.returncode == 0 and bool(re.search(r"UseNewOutlook\s+REG_DWORD\s+0x1\b", r.stdout))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return False
+
+
+def launch_desktop_mail(
+    eml_path: Path,
+    *,
+    sender_email: str = "",
+    to_email: str = "",
+    to_name: str = "",
+    subject: str = "",
+    html: str = "",
+    text: str = "",
+    attachments: Sequence[Path] | None = None,
+    auto_send: bool = True,
+) -> dict[str, Any]:
+    """Hand a mail to the computer's mail app (mail-only mode).
+
+    Returns ``{"app", "sent", "saved_only", "note"}``: ``sent`` is True only when classic Outlook sent
+    the mail itself; otherwise the mail is open for the person to click Send. ``saved_only`` means no
+    app could open it (for example New Outlook on Windows), so the person downloads the .eml instead.
+    """
+    if not eml_path.is_file():
+        raise OutlookError(f"Draft file not found: {eml_path.name}")
+    att_list = [p for p in (attachments or []) if p.is_file()]
+    if _desktop_launcher is not None:
+        r = _desktop_launcher(eml_path, sender_email=sender_email, to_email=to_email, to_name=to_name,
+                              subject=subject, html=html, text=text, attachments=att_list)
+        if isinstance(r, dict):
+            return {"app": str(r.get("app", "")), "sent": bool(r.get("sent")),
+                    "saved_only": bool(r.get("saved_only")), "note": str(r.get("note", ""))}
+        return {"app": str(r), "sent": False, "saved_only": False, "note": ""}
+
+    path_str = str(eml_path)
+    new_outlook = _is_new_outlook()
+    if sys.platform == "darwin":
+        has_outlook = subprocess.run(["open", "-Ra", "Microsoft Outlook"], capture_output=True, check=False,
+                                     timeout=5).returncode == 0
+        note = ""
+        if has_outlook and not new_outlook:
+            if to_email and subject and _MAIL_SCRIPT_OK:
+                cmd = ["osascript", "-", subject, html or text, to_name, to_email, sender_email,
+                       "1" if auto_send else "0", *(str(p) for p in att_list)]
+                res = subprocess.run(cmd, input=_MAIL_OUTLOOK_SCRIPT, capture_output=True, text=True,
+                                     check=False, timeout=20)
+                if res.returncode == 0:
+                    return {"app": "Microsoft Outlook", "sent": res.stdout.strip() == "sent",
+                            "saved_only": False, "note": ""}
+            res = subprocess.run(["open", "-a", "Microsoft Outlook", path_str], capture_output=True, text=True,
+                                 check=False, timeout=12)
+            if res.returncode == 0:
+                return {"app": "Microsoft Outlook", "sent": False, "saved_only": False, "note": ""}
+        elif has_outlook:
+            note = "New Outlook cannot open ready-to-send drafts, so the mail was opened in Apple Mail instead."
+        res_mail = subprocess.run(["open", "-a", "Mail", path_str], capture_output=True, text=True, check=False,
+                                  timeout=12)
+        if res_mail.returncode == 0:
+            return {"app": "Apple Mail", "sent": False, "saved_only": False, "note": note}
+        return {"app": "", "sent": False, "saved_only": True,
+                "note": "No mail app could open the mail. Download the .eml file and open it in your mail app."}
+
+    if sys.platform == "win32":
+        if to_email and subject:
+            script = _WINDOWS_OUTLOOK_PS if auto_send else _WINDOWS_OUTLOOK_OPEN_PS
+            ps_exe = shutil.which("powershell") or shutil.which("pwsh")
+            if ps_exe:
+                env = dict(os.environ)
+                env.update(HR_PS_SENDER=sender_email or "", HR_PS_TO=to_email or "", HR_PS_SUBJ=subject or "",
+                           HR_PS_HTML=html or "", HR_PS_TEXT=text or "",
+                           HR_PS_ATTACHMENTS="\n".join(str(p) for p in att_list))
+                res = subprocess.run([ps_exe, "-NoProfile", "-NonInteractive", "-Command", script], env=env,
+                                     capture_output=True, text=True, check=False, timeout=20)
+                if res.returncode == 0:
+                    return {"app": "Outlook Desktop", "sent": auto_send, "saved_only": False, "note": ""}
+        if new_outlook:
+            return {"app": "", "sent": False, "saved_only": True,
+                    "note": "New Outlook cannot open ready-to-send drafts. Download the .eml file, or choose "
+                            "Microsoft sign-in or SMTP sending in Mail settings."}
+        try:
+            os.startfile(path_str)  # type: ignore[attr-defined]
+            return {"app": "Outlook Desktop", "sent": False, "saved_only": False, "note": ""}
+        except OSError as exc:
+            raise OutlookError(f"Could not open desktop Outlook/Mail app: {exc}") from exc
+
+    opener = shutil.which("xdg-open")
+    if not opener:
+        return {"app": "", "sent": False, "saved_only": True,
+                "note": "No mail app was found on this computer. Download the .eml file instead."}
+    subprocess.Popen([opener, path_str], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"app": "Desktop Mail", "sent": False, "saved_only": False, "note": ""}
+
+
+_KNOWN_DOMAINS = {
+    "gmail.com": "google", "googlemail.com": "google",
+    "outlook.com": "microsoft", "hotmail.com": "microsoft", "live.com": "microsoft", "msn.com": "microsoft",
+}
+_DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+$")
+
+
+def lookup_mx(domain: str) -> list[str]:
+    """The mail servers (MX records) of a domain, using the system's nslookup. Empty when unknown."""
+    if _mx_resolver is not None:
+        return [h.rstrip(".").lower() for h in _mx_resolver(domain)]
+    exe = shutil.which("nslookup")
+    if not exe:
+        return []
+    try:
+        res = subprocess.run([exe, "-type=mx", domain], capture_output=True, text=True, check=False, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    hosts = re.findall(r"mail exchanger\s*=\s*(?:\d+\s+)?([A-Za-z0-9.-]+)", res.stdout)
+    return [h.rstrip(".").lower() for h in hosts]
+
+
+def detect_provider(email_addr: str) -> dict[str, Any]:
+    """Guess whether an address is on Google, Microsoft or another mail server, from its domain."""
+    addr = _safe_header(email_addr).lower()
+    if not checks.EMAIL_RE.fullmatch(addr):
+        raise ValueError("Enter a valid email address first.")
+    domain = addr.rsplit("@", 1)[1]
+    if not _DOMAIN_RE.fullmatch(domain):
+        raise ValueError("That email address has an unusual domain. Choose the provider yourself.")
+    if domain in _KNOWN_DOMAINS:
+        provider = _KNOWN_DOMAINS[domain]
+        return {"provider": provider, "domain": domain, "mx": [], "found": True, **SMTP_PRESETS[provider]}
+    mx = lookup_mx(domain)
+    if not mx:
+        return {"provider": "", "domain": domain, "mx": [], "found": False}
+    if any(h.endswith(("google.com", "googlemail.com")) for h in mx):
+        provider = "google"
+    elif any(h.endswith(("outlook.com", "office365.com")) or "protection.outlook" in h for h in mx):
+        provider = "microsoft"
+    else:
+        provider = "custom"
+    out: dict[str, Any] = {"provider": provider, "domain": domain, "mx": mx[:5], "found": True}
+    out.update(SMTP_PRESETS.get(provider, {}))
+    return out

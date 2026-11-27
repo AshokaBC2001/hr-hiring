@@ -5,6 +5,22 @@ import pytest
 from hiring import config, outlook
 
 
+class MemorySecrets:
+    """Stands in for the system keychain so tests never touch the real one."""
+
+    def __init__(self):
+        self.data: dict[str, str] = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+    def delete(self, key):
+        self.data.pop(key, None)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_outlook(monkeypatch: pytest.MonkeyPatch):
     """Ensure tests default to offline `.eml` mode with no live credentials or backends."""
@@ -26,10 +42,14 @@ def _isolate_outlook(monkeypatch: pytest.MonkeyPatch):
     outlook.set_smtp_backend(None)
     outlook.set_msal_factory(None)
     outlook.set_desktop_launcher(None)
+    outlook.set_mx_resolver(lambda domain: [])
+    outlook.set_secret_store(MemorySecrets())
     outlook.reset_auth_state()
     yield
     outlook.set_graph_backend(None)
     outlook.set_smtp_backend(None)
     outlook.set_msal_factory(None)
     outlook.set_desktop_launcher(None)
+    outlook.set_mx_resolver(None)
+    outlook.set_secret_store(None)
     outlook.reset_auth_state()

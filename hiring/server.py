@@ -172,6 +172,7 @@ def detail(c: db.Candidate) -> dict:
         events = list(s.scalars(select(db.Event).where(db.Event.candidate_id == c.id).order_by(db.Event.id)))
         runs = list(s.scalars(select(db.Run).where(db.Run.candidate_id == c.id).order_by(db.Run.id)))
     test_recipient = outlook.raw_settings().get("test_recipient", "")
+    invite = invitation.draft(c) if config.MODE == "mail" else None
     out = summary(c)
     out.update({
         "email_source": c.email_source, "profile": c.profile or {}, "profile_source": c.profile_source,
@@ -181,7 +182,10 @@ def detail(c: db.Candidate) -> dict:
         "checklist": c.checklist or [],
         "letter": _letter_json(c),
         "source": c.source or "", "university": c.university or "",
-        "invite": invitation.draft(c) if config.MODE == "mail" else None,
+        "invite": invite,
+        "mail_links": (outlook.compose_links(c.email, invite["subject"], invite["body"], test_recipient=test_recipient)
+                       if invite is not None and c.email else {}),
+        "email_in_cv": invitation.email_in_cv(c) if config.MODE == "mail" and not c.email else "",
         "register": invitation.row(c) if config.MODE == "mail" else None,
         "area_scores": [{"area": a, "score": sc} for a, sc in tools.top_areas(c.area_scores or {})],
         "active_areas": [a.name for a in db.active_areas()],
@@ -317,7 +321,50 @@ def mail_settings():
             "attachments": invitation.attachments(), "visit_weekday": s.get("visit_weekday", "Tuesday"),
             "next_visit_day": invitation.next_visit_day().isoformat(),
             "statuses": invitation.REGISTER_STATUSES, "ref_suggestion": invitation.suggest_ref(),
-            "outlook": outlook.public_settings()}
+            "outlook": outlook.public_settings(), "outbox": invitation.outbox_stats()}
+
+
+@app.post("/api/mail/detect")
+async def detect_mail_provider(request: Request):
+    """Guess the provider (Google, Microsoft or another server) from the domain of an email address."""
+    _need_role(request, "hr")
+    b = await _json_dict(request)
+    try:
+        return outlook.detect_provider(str(b.get("email", "")))
+    except ValueError as exc:
+        raise invitation.MailProblem(str(exc)) from exc
+
+
+@app.post("/api/mail/outbox/shrink")
+def shrink_mail_outbox(request: Request):
+    _need_role(request, "hr")
+    return invitation.shrink_outbox()
+
+
+@app.post("/api/mail/students")
+async def add_student_by_hand(request: Request):
+    _need_role(request, "hr")
+    return invitation.add_by_hand(await _json_dict(request))
+
+
+@app.post("/api/mail/bulk/prepare")
+async def bulk_prepare_invites(request: Request):
+    _need_role(request, "hr")
+    b = await _json_dict(request)
+    return invitation.bulk_prepare(list(b.get("app_nos") or []), str(b.get("visit_date", "")),
+                                   list(b.get("attachments") or []))
+
+
+@app.post("/api/mail/bulk/send")
+async def bulk_send_invites(request: Request):
+    _need_role(request, "hr")
+    b = await _json_dict(request)
+    return invitation.bulk_start(list(b.get("app_nos") or []))
+
+
+@app.get("/api/mail/bulk/{job_id}")
+def bulk_send_status(job_id: str):
+    return invitation.bulk_status(job_id)
 
 
 @app.post("/api/mail/settings")
@@ -387,10 +434,40 @@ async def send_invite(app_no: str, request: Request):
     b = await _json_dict(request, allow_empty=True)
     if b.get("subject") is not None:          # save what is on the screen first
         c = db.get_candidate(app_no)
-        if c is not None and (c.invite or {}).get("status") != "sent":
+        if c is not None and (c.invite or {}).get("status") not in ("sent", "opened"):
             invitation.save_draft(app_no, b.get("subject", ""), b.get("body", ""), b.get("visit_date", ""),
                               b.get("attachments", []))
     return {"invite": invitation.send(app_no)}
+
+
+@app.post("/api/candidates/{app_no}/mail/confirm")
+def confirm_invite_sent(app_no: str, request: Request):
+    _need_role(request, "hr")
+    return {"invite": invitation.confirm_sent(app_no)}
+
+
+@app.post("/api/candidates/{app_no}/mail/back-to-draft")
+def invite_back_to_draft(app_no: str, request: Request):
+    _need_role(request, "hr")
+    return {"invite": invitation.back_to_draft(app_no)}
+
+
+@app.post("/api/candidates/{app_no}/mail/resend")
+def resend_invite(app_no: str, request: Request):
+    _need_role(request, "hr")
+    return {"invite": invitation.resend(app_no)}
+
+
+@app.post("/api/candidates/{app_no}/reply")
+async def read_student_reply(app_no: str, request: Request):
+    _need_role(request, "hr")
+    return invitation.read_reply(app_no, str((await _json_dict(request)).get("text", "")))
+
+
+@app.post("/api/candidates/{app_no}/by-hand")
+async def fill_candidate_by_hand(app_no: str, request: Request):
+    _need_role(request, "hr")
+    return invitation.fill_by_hand(app_no, await _json_dict(request))
 
 
 @app.get("/api/candidates/{app_no}/mail/eml")
@@ -436,17 +513,36 @@ async def save_register(app_no: str, request: Request):
     return {"register": invitation.save_row(app_no, await _json_dict(request)), "ref_suggestion": invitation.suggest_ref()}
 
 
+def _register_filters(date_from: str, date_to: str, status: str, source: str) -> dict:
+    return {"date_from": date_from, "date_to": date_to, "status": status, "source": source}
+
+
+def _export_name(ext: str, date_from: str, date_to: str) -> str:
+    span = f"_{date_from or 'start'}_to_{date_to or 'today'}" if (date_from or date_to) else ""
+    return f"Intern_register_{date.today().isoformat()}{span}.{ext}"
+
+
 @app.get("/api/register")
-def register(show: str = "all", q: str = ""):
-    data, counts = invitation.register_data(show, q)
-    return {"rows": data, "columns": invitation.REGISTER_COLUMNS, "counts": counts}
+def register(show: str = "all", q: str = "", date_from: str = "", date_to: str = "", status: str = "", source: str = ""):
+    data, counts = invitation.register_data(show, q, **_register_filters(date_from, date_to, status, source))
+    return {"rows": data, "columns": invitation.REGISTER_COLUMNS, "counts": counts,
+            "statuses": invitation.REGISTER_STATUSES, "sources": invitation.sources()}
 
 
 @app.get("/api/register.xlsx")
-def register_xlsx(show: str = "all", q: str = ""):
-    name = f"Intern_register_{date.today().isoformat()}.xlsx"
-    return Response(invitation.export_xlsx(invitation.rows(show, q)),
+def register_xlsx(show: str = "all", q: str = "", date_from: str = "", date_to: str = "", status: str = "", source: str = ""):
+    name = _export_name("xlsx", date_from, date_to)
+    data = invitation.rows(show, q, **_register_filters(date_from, date_to, status, source))
+    return Response(invitation.export_xlsx(data),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/api/register.csv")
+def register_csv(show: str = "all", q: str = "", date_from: str = "", date_to: str = "", status: str = "", source: str = ""):
+    name = _export_name("csv", date_from, date_to)
+    data = invitation.rows(show, q, **_register_filters(date_from, date_to, status, source))
+    return Response(invitation.export_csv(data), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 

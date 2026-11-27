@@ -146,12 +146,24 @@ function renderFrame() {
     : eff === "graph" || eff === "graph_send"
     ? `Outlook: Graph Send (${acct || "sign in required"})`
     : eff === "smtp"
-    ? `Outlook: Office 365 SMTP (${ol.smtp_user || ol.smtp_host})`
+    ? `${MAILMODE() ? (SMTP_NAMES[ol.provider] || "SMTP") : "Outlook: Office 365 SMTP"} (${ol.smtp_user || ol.smtp_host})`
     : "Outlook: Draft files (.eml) & Outlook Web";
   const redir = ol.test_recipient ? ` -> demo: ${ol.test_recipient}` : "";
+  mailBanner(ol);
   $("#foot").textContent = MAILMODE()
     ? `${APP_NAME} - mail-only mode (${olText}${redir}). AI team: ${working ? working.name + " is working" : "waiting for work"}.`
     : `${APP_NAME} - ${olText}${redir}. AI team: ${STATE.paused ? "paused" : working ? working.name + " is working" : "waiting for work"}.`;
+}
+// Mail-only mode: a warning on every page while all mails go to the test inbox.
+const SMTP_NAMES = { microsoft: "Microsoft SMTP", google: "Google SMTP", custom: "SMTP" };
+function mailBanner(ol) {
+  let el = $("#mail-banner");
+  if (!el) { el = document.createElement("div"); el.id = "mail-banner"; $("main").prepend(el); }
+  const on = MAILMODE() && ol && ol.test_recipient;
+  el.hidden = !on;
+  el.innerHTML = on ? `<div class="notice error" style="margin-top:16px"><div class="grow"><b>Test inbox is on:</b>
+    <span>every mail goes to ${esc(ol.test_recipient)}, not to the students. Test sends are not counted in the register.</span></div>
+    <a class="btn small" href="#/mailsettings">Change in Mail settings</a></div>` : "";
 }
 async function refreshState() {
   try { STATE = await api("/api/state"); } catch { return; }
@@ -161,12 +173,12 @@ async function refreshState() {
 function openQuickGuide() {
   const mailHtml = `
     <h3>How to Use HR Hiring (Quick Guide)</h3>
-    <p class="small muted" style="margin-top:0">No email passwords or Azure setup needed. Clicking <b>Send mail</b> opens the email directly in your Outlook or Mail app with all 4 SLT attachments already attached.</p>
+    <p class="small muted" style="margin-top:0">No email passwords or Azure setup needed. Clicking <b>Send mail</b> opens the email directly in your Outlook or Mail app with all the attachments already attached. To send directly from Microsoft, Google or another mail server, set it up once in <b>Mail settings</b>.</p>
     <ol class="clean" style="line-height:1.55">
       <li><b>Add CV:</b> Drag and drop student CVs (PDF, Word or TXT), optionally enter the <b>Source</b>, and click <b>Add CVs</b>.</li>
       <li><b>Open Candidate:</b> Click <b>Register</b> in the top menu, then click any student row. Add their email if the CV didn't have one.</li>
-      <li><b>Check &amp; Send Mail:</b> Verify the suggested Tuesday visit date, click <b>Preview</b> if desired, then click <b>Send mail</b>. Your Outlook / Mail window opens &mdash; just click <b>Send</b>.</li>
-      <li><b>Save Replies &amp; Export:</b> When the student replies, fill NIC, Tel No &amp; Laptop Serial on their page (use <b>Use next: ...</b> for reference numbers), and click <b>Export to Excel</b> on the <b>Register</b> page.</li>
+      <li><b>Check &amp; Send Mail:</b> Verify the suggested Tuesday visit date, click <b>Preview</b> if desired, then click <b>Send mail</b>. If your Outlook / Mail window opens, click <b>Send</b> there, then click <b>I sent it</b> here so the register gets the mail date. To mail several students, tick them on the <b>Register</b> page and click <b>Prepare invitations</b>.</li>
+      <li><b>Save Replies &amp; Export:</b> When the student replies, open <b>Paste the student's reply</b> on their page to fill NIC, Tel No &amp; Laptop Serial (or type them), use <b>Use next: ...</b> for reference numbers, and click <b>Export to Excel</b> or <b>Export CSV</b> on the <b>Register</b> page.</li>
     </ol>
     <div class="actions" style="margin-top:14px"><button type="button" class="btn primary" data-dlg="close-guide">Got it</button></div>`;
   const fullHtml = `
@@ -304,7 +316,31 @@ function _outlookControlsMarkup(c, prefix = "ol") {
     ? `<div class="notice need" style="padding:8px 10px"><div class="grow small">Waiting for code <span class="code-pill">${esc(a.user_code)}</span> at microsoft.com/devicelogin</div></div>`
     : `<div class="actions"><button type="button" class="btn primary small" data-dlg="ol-signin">Sign in with Microsoft (Browser)</button><button type="button" class="btn small" data-dlg="ol-device">Use sign-in code</button>${a.error ? `<span class="small" style="color:var(--fail)">${esc(a.error)}</span>` : ""}</div>`;
 
-  return `
+  const mailUI = prefix === "ms-ol";          // the Mail settings page of mail-only mode
+  const provider = c.provider || "microsoft";
+  const pwStore = c.password_store === "keychain" ? "Saved in this computer's keychain."
+    : c.password_store === "database" ? "Saved in the app's local database (install the keyring package to keep it in the keychain)." : "";
+  const topFields = mailUI ? `
+    <div class="grid two">
+      <div class="form-row" style="margin:0"><label for="${prefix}-fname">Sender Name</label><input type="text" id="${prefix}-fname" value="${esc(c.from_name || "Digital Platforms Development Section")}" placeholder="e.g. your name or your section"></div>
+      <div class="form-row" style="margin:0"><label for="${prefix}-semail">Your email</label>
+        <div class="actions" style="flex-wrap:nowrap"><input type="email" id="${prefix}-semail" value="${esc(savedEmail)}" placeholder="you@your-organisation.com">
+        <button type="button" class="btn small" id="${prefix}-detect" title="Find the provider from the email address">Detect</button></div></div>
+    </div>
+    <div class="form-row" style="margin-top:10px"><label for="${prefix}-provider">Email provider</label>
+      <select id="${prefix}-provider">
+        <option value="microsoft" ${provider === "microsoft" ? "selected" : ""}>Microsoft (Outlook, Microsoft 365, Outlook.com)</option>
+        <option value="google" ${provider === "google" ? "selected" : ""}>Google (Gmail, Google Workspace)</option>
+        <option value="custom" ${provider === "custom" ? "selected" : ""}>Other mail server (SMTP)</option>
+        <option value="desktop" ${provider === "desktop" ? "selected" : ""}>Outlook or Mail app on this computer (no password)</option>
+      </select>
+      <div class="help" id="${prefix}-provider-help">${esc(PROVIDER_HELP[provider] || "")}</div></div>
+    <div class="form-row" id="${prefix}-pass-row" style="margin-top:10px;${provider === "desktop" ? "display:none" : ""}">
+      <label for="${prefix}-spass" id="${prefix}-pass-label">${PASS_LABEL[provider] || PASS_LABEL.microsoft}</label>
+      <input type="password" id="${prefix}-spass" placeholder="${c.has_smtp_password ? "Saved (leave blank to keep the saved password)" : "Optional — leave blank to send through your mail app"}">
+      ${pwStore ? `<div class="help">${esc(pwStore)}</div>` : ""}
+      ${c.has_smtp_password ? `<label class="check" style="margin-top:6px"><input type="checkbox" id="${prefix}-clear-pw"> Clear saved password</label>` : ""}
+    </div>` : `
     <div class="grid two">
       <div class="form-row" style="margin:0"><label for="${prefix}-fname">Sender Name</label><input type="text" id="${prefix}-fname" value="${esc(c.from_name || "Digital Platforms Development Section")}" placeholder="e.g. Giridaran / SLT HR"></div>
       <div class="form-row" style="margin:0"><label for="${prefix}-semail">Your Outlook Email</label><input type="email" id="${prefix}-semail" value="${esc(savedEmail)}" placeholder="you@slt.com.lk or you@outlook.com"></div>
@@ -313,9 +349,12 @@ function _outlookControlsMarkup(c, prefix = "ol") {
       <label for="${prefix}-spass">Outlook Password / App Password <span class="small muted">(optional &mdash; leave blank to use your Outlook / Mail app)</span></label>
       <input type="password" id="${prefix}-spass" placeholder="${c.has_smtp_password ? "Saved (leave blank to keep existing password)" : "Optional — leave blank if you don't use SMTP password"}">
       ${c.has_smtp_password ? `<label class="check" style="margin-top:6px"><input type="checkbox" id="${prefix}-clear-pw"> Clear saved password</label>` : ""}
-    </div>
+    </div>`;
+  const showGraph = isGraph && (!mailUI || provider === "microsoft");
+  const showSmtpSec = showSmtp || (mailUI && provider === "custom");
+  return `${topFields}
     <div id="${prefix}-status-banner" style="margin-top:10px">${statusBanner}</div>
-    <details id="${prefix}-adv" style="margin-top:12px" ${openAdv ? "open" : ""}>
+    <details id="${prefix}-adv" style="margin-top:12px" ${openAdv || (mailUI && provider === "custom") ? "open" : ""}>
       <summary class="small muted" style="cursor:pointer;user-select:none">Advanced options (delivery mode, Microsoft App ID &amp; custom SMTP server)</summary>
       <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)">
         <div class="form-row">
@@ -329,7 +368,7 @@ function _outlookControlsMarkup(c, prefix = "ol") {
             <option value="smtp" ${mode === "smtp" ? "selected" : ""}>Direct Office 365 / Outlook SMTP</option>
           </select>
         </div>
-        <div id="${prefix}-graph-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${isGraph ? "" : "display:none"}">
+        <div id="${prefix}-graph-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${showGraph ? "" : "display:none"}">
           <div class="label" style="margin-bottom:6px">Microsoft 365 / Outlook Graph (OAuth2 Sign-In)</div>
           <div class="grid two">
             <div class="form-row" style="margin:0"><label for="${prefix}-client">Application (Client) ID</label><input type="text" id="${prefix}-client" value="${esc(c.client_id)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
@@ -338,12 +377,17 @@ function _outlookControlsMarkup(c, prefix = "ol") {
           <div class="help" style="margin:4px 0 8px">Keep <code>common</code> for both Microsoft 365 work accounts and Outlook.com.</div>
           <div id="${prefix}-auth-box">${authBlock}</div>
         </div>
-        <div id="${prefix}-smtp-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${showSmtp ? "" : "display:none"}">
-          <div class="label" style="margin-bottom:6px">Custom Office 365 SMTP Settings</div>
+        <div id="${prefix}-smtp-sec" style="margin-top:12px;padding:10px;border:1px solid var(--line-soft);border-radius:4px;${showSmtpSec ? "" : "display:none"}">
+          <div class="label" style="margin-bottom:6px">${mailUI ? "SMTP server" : "Custom Office 365 SMTP Settings"}</div>
           <div class="grid two">
-            <div class="form-row" style="margin:0"><label for="${prefix}-shost">SMTP Host</label><input type="text" id="${prefix}-shost" value="${esc(c.smtp_host)}" placeholder="smtp.office365.com"></div>
+            <div class="form-row" style="margin:0"><label for="${prefix}-shost">SMTP Host</label><input type="text" id="${prefix}-shost" value="${esc(c.smtp_host)}" placeholder="${mailUI ? "smtp.your-organisation.com" : "smtp.office365.com"}"></div>
             <div class="form-row" style="margin:0"><label for="${prefix}-sport">SMTP Port</label><input type="text" id="${prefix}-sport" value="${esc(c.smtp_port)}" placeholder="587"></div>
           </div>
+          ${mailUI ? `<div class="form-row" style="margin:8px 0 0"><label for="${prefix}-ssec">Security</label><select id="${prefix}-ssec">
+            <option value="starttls" ${c.smtp_security === "starttls" ? "selected" : ""}>STARTTLS (usually port 587)</option>
+            <option value="ssl" ${c.smtp_security === "ssl" ? "selected" : ""}>SSL / TLS (usually port 465)</option>
+            <option value="none" ${c.smtp_security === "none" ? "selected" : ""}>None (not recommended)</option></select>
+            <div class="help">Microsoft and Google fill these in for you. For another server, ask your IT team.</div></div>` : ""}
           <div class="form-row" style="margin-top:8px"><label for="${prefix}-suser">Custom SMTP Username (only if different from Your Outlook Email)</label><input type="email" id="${prefix}-suser" value="${esc(customSmtpUser)}" placeholder="Same as Your Outlook Email"></div>
           <label class="check" style="margin-top:6px"><input type="checkbox" id="${prefix}-sfallback" ${c.smtp_fallback !== false ? "checked" : ""}> Use Office 365 SMTP automatically as a fallback if Microsoft Graph fails</label>
         </div>
@@ -356,13 +400,41 @@ function _outlookControlsMarkup(c, prefix = "ol") {
     </details>`;
 }
 
+const PROVIDER_HELP = {
+  microsoft: "With a password, mails go out through smtp.office365.com (port 587, STARTTLS). Leave the password blank to send through your Outlook / Mail app. You can also sign in with Microsoft under Advanced options.",
+  google: "With a Google App Password, mails go out through smtp.gmail.com (port 587, STARTTLS). Make one at Google Account > Security > 2-Step Verification > App passwords. Leave it blank to send through your mail app.",
+  custom: "Enter your mail server under Advanced options below. Ask your IT team for the server name, port and security.",
+  desktop: "Send mail opens the mail with all its attachments in Outlook or Apple Mail. No password is stored.",
+};
+const PASS_LABEL = {
+  microsoft: `Password / App Password <span class="small muted">(optional &mdash; leave blank to use your Outlook / Mail app)</span>`,
+  google: `Google App Password <span class="small muted">(16 letters, not your normal password &mdash; optional)</span>`,
+  custom: `Password <span class="small muted">(for your mail server)</span>`,
+};
+const SMTP_PRESETS = { microsoft: ["smtp.office365.com", "587", "starttls"], google: ["smtp.gmail.com", "587", "starttls"] };
+function _applyProvider(prefix, provider) {
+  const help = $(`#${prefix}-provider-help`), label = $(`#${prefix}-pass-label`), row = $(`#${prefix}-pass-row`);
+  if (help) help.textContent = PROVIDER_HELP[provider] || "";
+  if (label) label.innerHTML = PASS_LABEL[provider] || PASS_LABEL.microsoft;
+  if (row) row.style.display = provider === "desktop" ? "none" : "";
+  const preset = SMTP_PRESETS[provider];
+  if (preset) {
+    $(`#${prefix}-shost`).value = preset[0]; $(`#${prefix}-sport`).value = preset[1];
+    if ($(`#${prefix}-ssec`)) $(`#${prefix}-ssec`).value = preset[2];
+  } else if (provider === "custom" && Object.values(SMTP_PRESETS).some((p) => p[0] === $(`#${prefix}-shost`).value)) {
+    $(`#${prefix}-shost`).value = "";
+  }
+  if (provider === "custom" && $(`#${prefix}-adv`)) $(`#${prefix}-adv`).open = true;
+  _syncOutlookModeUI(prefix);
+}
 function _syncOutlookModeUI(prefix = "ol") {
   const mode = $(`#${prefix}-mode`)?.value || "auto";
+  const provider = $(`#${prefix}-provider`)?.value || "";
   const isGraph = mode === "auto" || mode === "graph" || mode === "graph_send" || mode === "graph_draft";
   const fb = !!$(`#${prefix}-sfallback`)?.checked;
-  const showSmtp = mode === "smtp" || (isGraph && fb);
+  const showSmtp = mode === "smtp" || (isGraph && fb) || provider === "custom";
   const graphSec = $(`#${prefix}-graph-sec`), smtpSec = $(`#${prefix}-smtp-sec`);
-  if (graphSec) graphSec.style.display = isGraph ? "" : "none";
+  if (graphSec) graphSec.style.display = isGraph && (!provider || provider === "microsoft") ? "" : "none";
   if (smtpSec) smtpSec.style.display = showSmtp ? "" : "none";
 }
 
@@ -382,6 +454,8 @@ function _collectOutlookPayload(prefix = "ol") {
     smtp_use_tls: true,
     smtp_fallback: !!$(`#${prefix}-sfallback`).checked,
   };
+  if ($(`#${prefix}-provider`)) p.provider = $(`#${prefix}-provider`).value;
+  if ($(`#${prefix}-ssec`)) p.smtp_security = $(`#${prefix}-ssec`).value;
   if ($(`#${prefix}-clear-pw`)?.checked) p.clear_smtp_password = true;
   else if ($(`#${prefix}-spass`).value) p.smtp_password = $(`#${prefix}-spass`).value;
   return p;
@@ -605,7 +679,7 @@ async function pAdd(arg) {
             ${files.length ? `<button class="btn" data-act="clear-files">Clear</button>` : ""}
             <span class="spacer"></span><button class="btn" data-act="samples" title="17 made-up CVs in PDF, Word and text files, for demos and testing">Load the sample CVs</button></div>
         </div>
-      </div>${resultLine}</div>
+      </div>${resultLine}${MAILMODE() ? handAddBox() : ""}</div>
     <div class="box">${boxHead("CV pool", counts)}
       <div class="filters"><div class="tabs">${POOL_SHOW.map(([k, l]) => `<button class="${UI.poolShow === k ? "on" : ""}" data-act="pool-show" data-s="${k}">${esc(l)}${k === "no_area" && st.no_area ? ` (${esc(st.no_area)})` : ""}${k === "archived" && st.archived ? ` (${esc(st.archived)})` : ""}</button>`).join("")}</div>
         <select id="pool-area" style="width:auto"><option value="">All areas</option>${r.areas.map((a) => `<option ${a === UI.poolArea ? "selected" : ""}>${esc(a)}</option>`).join("")}</select>
@@ -621,9 +695,54 @@ async function pAdd(arg) {
   em.oninput = () => { UI.cvEmail = em.value; };
   const so = $("#cv-source");
   so.oninput = () => { UI.cvSource = so.value; };
+  if (MAILMODE()) bindHandAdd();
   $("#pool-area").onchange = (e) => { UI.poolArea = e.target.value; e.target.blur(); lastHTML = ""; pAdd(); };
   const qi = $("#pool-q");
   qi.oninput = () => { UI.poolQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pAdd().then(() => { const n = $("#pool-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
+}
+// Mail-only mode: a student typed in by hand (no CV file, or the model is not running).
+const HAND_FIELDS = [["name", "Name", "text", "As it should appear in the mail"], ["email", "Email", "email", "name@example.com"],
+  ["university", "University", "text", ""], ["technology", "Technology", "text", "For example Java, AI/ML"], ["source", "Source", "text", "Who sent the student"]];
+function handInputs(prefix, values) {
+  return `<div class="grid two" style="margin-top:8px">${HAND_FIELDS.map(([k, label, type, ph]) => `<div class="form-row" style="margin:0 0 10px">
+    <label for="${prefix}-${k}">${esc(label)}${k === "name" || k === "email" ? " *" : ""}</label>
+    <input type="${type}" id="${prefix}-${k}" value="${esc(values[k] || "")}" placeholder="${esc(ph)}"></div>`).join("")}</div>`;
+}
+function readHand(prefix) {
+  const out = {};
+  HAND_FIELDS.forEach(([k]) => { out[k] = $(`#${prefix}-${k}`)?.value.trim() || ""; });
+  return out;
+}
+function handAddBox() {
+  const down = STATE && !STATE.model.ok;
+  const v = UI.hand || { source: UI.cvSource };
+  return `<details class="field" id="hand-box" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line-soft)" ${UI.handOpen || (down && UI.handOpen !== false) ? "open" : ""}>
+    <summary class="label" style="cursor:pointer">Add a student without a CV${down ? " (the model is not running)" : ""}</summary>
+    ${handInputs("hand", v)}
+    <div class="actions"><button class="btn primary" data-act="hand-add">Add student</button>
+      <span class="small muted">Use this when there is no CV file, or when the Recruiter cannot read CVs because the model is not running.</span></div></details>`;
+}
+function bindHandAdd() {
+  const box = $("#hand-box");
+  if (!box) return;
+  box.ontoggle = () => { UI.handOpen = box.open; };
+  HAND_FIELDS.forEach(([k]) => { const el = $(`#hand-${k}`); if (el) el.oninput = () => { UI.hand = readHand("hand"); }; });
+}
+function handFillBox(c) {
+  if (!["new", "needs_person"].includes(c.status)) return "";
+  const down = STATE && !STATE.model.ok;
+  const head = c.status === "needs_person" ? "The Recruiter could not read this CV."
+    : down ? "The model is not running, so the Recruiter cannot read this CV." : "The Recruiter is reading this CV.";
+  const open = UI.handFor === c.app_no;
+  const v = UI.handFill && UI.handFill.app === c.app_no ? UI.handFill : { email: c.email || c.email_in_cv || "", source: c.source || "" };
+  return `<div class="box" id="hand-fill">${notice(down || c.status === "needs_person" ? "need" : "ok", head,
+      open ? "Type the details from the CV, then click Save. The mail can be sent after that." : "The mail can be sent when it has finished, or you can type the details yourself.",
+      open ? "" : `<button class="btn small" data-act="hand-open">Enter details by hand</button>`)}
+    ${open ? `${handInputs("handc", v)}${c.email_in_cv && !c.email ? `<div class="help" style="margin-top:-4px">The email was found in the CV text. Check it.</div>` : ""}
+      <div class="actions"><button class="btn primary" data-act="hand-fill">Save details</button><button class="btn" data-act="hand-cancel">Cancel</button></div>` : ""}</div>`;
+}
+function bindHandForm(c) {
+  HAND_FIELDS.forEach(([k]) => { const el = $(`#handc-${k}`); if (el) el.oninput = () => { UI.handFill = { app: c.app_no, ...readHand("handc") }; }; });
 }
 function addFiles(list) {
   for (const f of list) if (!UI.files.some((x) => x.name === f.name && x.size === f.size)) UI.files.push(f);
@@ -800,9 +919,9 @@ async function pCandidate(appNo) {
     : inPool ? `<a class="back" href="#/add">&larr; CV pool</a>` : `<a class="back" href="#/candidates">&larr; All candidates</a>`;
   setView(`${back}
     <div class="box"><div class="box-head"><h2 style="font-size:18px">${esc(c.name)}</h2><div class="spacer"></div>
-      <a class="btn" href="/api/candidates/${encodeURIComponent(c.app_no)}/cv">Download CV</a></div>
+      ${c.cv_filename ? `<a class="btn" href="/api/candidates/${encodeURIComponent(c.app_no)}/cv">Download CV</a>` : `<span class="small muted">Added by hand, no CV file</span>`}</div>
       <div class="actions">${esc(c.app_no)} ${statusTag(c)}${c.area ? ` <span>Area: ${esc(c.area)}</span>` : ""}${c.score != null ? ` <span>Score: ${esc(c.score)}/100</span>` : ""}${c.work_id ? ` <b>Work ID ${esc(c.work_id)}</b>` : ""}</div></div>
-    ${MAILMODE() ? (c.status === "new" ? notice("ok", "The Recruiter is reading this CV.", "The mail can be sent when it has finished.") : "") : ROLE === "hr" ? nextStep(c, areas.areas) : notice("ok", "You are viewing this as the Interviewer.", "Open it from the Interviews page to enter a result.")}
+    ${MAILMODE() ? handFillBox(c) : ROLE === "hr" ? nextStep(c, areas.areas) : notice("ok", "You are viewing this as the Interviewer.", "Open it from the Interviews page to enter a result.")}
     ${flags.length ? `<div class="box">${boxHead("Notes to check", `<span class="small muted">From the AI team</span>`)}<table class="t"><tbody>
       ${flags.map((f) => `<tr><td>${esc(f.text)}<div class="small muted">${esc(f.by)} - ${esc(fmtTime(f.at))}</div></td>
         <td style="text-align:right">${ROLE === "hr" ? `<button class="btn small" data-act="resolve" data-i="${f.index}">Mark as checked</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : ""}
@@ -861,38 +980,82 @@ function shortDate(iso) {            // 5-Sep-26, like the section's sheet
   const d = new Date(iso + "T00:00:00");
   return `${d.getDate()}-${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]}-${String(d.getFullYear()).slice(2)}`;
 }
-const REG_TAG = { "Not mailed": "need", "Not coming": "fail", "Confirmed": "pass", "Visited": "pass" };
+const REG_TAG = { "Not mailed": "need", "Opened, not confirmed": "need", "Not coming": "fail", "Confirmed": "pass", "Visited": "pass" };
 function regTag(s) { return tag(s, REG_TAG[s] || ""); }
 
 function inviteValues(c) {
   return UI.inviteEdit && UI.inviteEdit.app === c.app_no ? UI.inviteEdit : { app: c.app_no, ...c.invite };
 }
+const HOW_LABEL = { outlook_app: "Mail app", eml: ".eml file", graph: "Microsoft Outlook", graph_send: "Microsoft Outlook",
+  graph_draft: "Outlook Drafts", smtp: "SMTP", failed: "Failed" };
+function inviteHistory(inv) {
+  const h = inv.history || [];
+  if (!h.length) return "";
+  return `<details class="field"><summary class="label" style="cursor:pointer">Send history (${h.length})</summary>
+    <table class="t"><thead><tr><th>Time</th><th>How</th><th>To</th><th>Result</th></tr></thead><tbody>
+    ${h.slice().reverse().map((x) => `<tr><td class="small muted">${esc(fmtTime(x.at))}</td><td>${esc(HOW_LABEL[x.how] || x.how)}</td>
+      <td>${esc(x.sent_to || "")}${x.test ? " " + tag("Test inbox") : ""}</td>
+      <td class="small">${x.how === "failed" ? `<span style="color:var(--fail)">${esc(x.error || "Failed")}</span>`
+        : x.status === "sent" ? tag("Sent", "pass") : x.status === "opened" ? tag("Opened, not confirmed", "need") : esc(x.status || "")}</td></tr>`).join("")}
+    </tbody></table></details>`;
+}
 function inviteBox(c) {
   const v = inviteValues(c);
+  const inv = c.invite;
   const url = `/api/candidates/${encodeURIComponent(c.app_no)}/mail/preview`;
-  const sent = c.invite.status === "sent";
   const files = UI.mailFiles || [];
-  if (sent) {
-    const how = c.invite.how || "eml";
+  const to = esc(inv.sent_to || c.email);
+  const emlLink = inv.file ? `<a class="btn" href="/api/candidates/${encodeURIComponent(c.app_no)}/mail/eml">Download .eml</a>` : "";
+  const outlookLink = inv.web_link ? `<a class="btn" href="${esc(inv.web_link)}" target="_blank" rel="noopener">Open in Outlook</a>` : "";
+  const fields = (when, label) => `
+      <div class="field"><div class="label">To</div><div>${esc(c.name)} &lt;${to}&gt;</div></div>
+      <div class="field"><div class="label">Subject</div><div>${esc(inv.subject)}</div></div>
+      <div class="field"><div class="label">${label}</div><div>${esc(fmtTime(when))}</div></div>
+      <div class="field"><div class="label">Attachments</div><div>${inv.attachments.length ? esc(inv.attachments.join(", ")) : `<span class="muted">No attachments</span>`}</div></div>`;
+  if (inv.status === "sent") {
+    const how = inv.how || "eml";
     let sentInfo = "";
-    if (how === "outlook_app") sentInfo = ` Opened in ${esc(c.invite.opened_in || "Outlook / Mail")} for ${esc(c.invite.sent_to || c.email)}.`;
-    else if (how === "graph") sentInfo = ` Sent via Outlook Graph${c.invite.sender ? " from " + esc(c.invite.sender) : ""} to ${esc(c.invite.sent_to || c.email)}.`;
-    else if (how === "graph_draft") sentInfo = ` Saved to Outlook Drafts for ${esc(c.invite.sent_to || c.email)}.`;
-    else if (how === "smtp") sentInfo = ` Sent via Office 365 SMTP (${esc(c.invite.sender || "SMTP")}) to ${esc(c.invite.sent_to || c.email)}.`;
-    if (c.invite.file) sentInfo += ` Saved to data/outbox/${esc(c.invite.file)}.`;
-    const emlLink = c.invite.file ? `<a class="btn" href="/api/candidates/${encodeURIComponent(c.app_no)}/mail/eml">Download .eml</a>` : "";
-    const reopenBtn = c.invite.file ? `<button class="btn" data-act="inv-open">Open in Outlook / Mail app</button>` : "";
-    const outlookLink = c.invite.web_link ? `<a class="btn" href="${esc(c.invite.web_link)}" target="_blank" rel="noopener">Open in Outlook</a>` : "";
+    if (inv.confirmed_at) sentInfo = ` Sent from ${esc(inv.opened_in || HOW_LABEL[how] || "your mail app")} (you confirmed it).`;
+    else if (how === "outlook_app") sentInfo = ` Sent by ${esc(inv.opened_in || "Outlook")} to ${to}.`;
+    else if (how === "graph" || how === "graph_send") sentInfo = ` Sent via Microsoft Outlook${inv.sender ? " from " + esc(inv.sender) : ""} to ${to}.`;
+    else if (how === "smtp") sentInfo = ` Sent by SMTP (${esc(inv.sender || "SMTP")}) to ${to}.`;
+    if (inv.file) sentInfo += ` Copy saved as data/outbox/${esc(inv.file)}.`;
     return `<div class="box" id="invite">${boxHead("Invitation mail", tag("Mail sent", "pass"))}
-      <div class="field"><div class="label">To</div><div>${esc(c.name)} &lt;${esc(c.invite.sent_to || c.email)}&gt;</div></div>
-      <div class="field"><div class="label">Subject</div><div>${esc(c.invite.subject)}</div></div>
-      <div class="field"><div class="label">Sent</div><div>${esc(fmtTime(c.invite.sent_at))}<span class="small muted">${sentInfo}</span></div></div>
-      <div class="field"><div class="label">Attachments</div><div>${c.invite.attachments.length ? esc(c.invite.attachments.join(", ")) : `<span class="muted">No attachments</span>`}</div></div>
-      <div class="actions"><a class="btn" href="${url}" target="_blank" rel="noopener">View the mail</a>${reopenBtn}${outlookLink}${emlLink}</div></div>`;
+      ${fields(inv.sent_at, "Sent")}
+      <p class="small muted" style="margin:0">${sentInfo}</p>
+      ${inviteHistory(inv)}
+      <div class="actions"><a class="btn" href="${url}" target="_blank" rel="noopener">View the mail</a>${inv.file ? `<button class="btn" data-act="inv-open">Open in Outlook / Mail app</button>` : ""}${outlookLink}${emlLink}
+        <span class="spacer"></span><button class="btn" data-act="inv-resend">Resend</button></div></div>`;
   }
+  if (inv.status === "opened") {
+    const how = inv.how || "eml";
+    const what = inv.saved_only ? notice("error", "No mail app could open this mail.", inv.note || "Download the .eml file and open it in your mail app, send it there, then click I sent it.")
+      : how === "graph_draft" ? notice("need", "Saved in your Outlook Drafts folder.", "Send it from Outlook, then click I sent it here.")
+      : how === "eml" ? notice("need", "Saved as an .eml file.", "Open it in your mail app and send it, then click I sent it here.")
+      : notice("need", `Opened in ${inv.opened_in || "your mail app"}. Did you click Send there?`,
+          (inv.note ? inv.note + " " : "") + "The register shows the mail date only after you click I sent it.");
+    return `<div class="box" id="invite">${boxHead("Invitation mail", tag("Opened, not confirmed", "need"))}
+      ${what}
+      ${fields(inv.opened_at, "Opened")}
+      ${inviteHistory(inv)}
+      <div class="actions"><button class="btn primary" data-act="inv-confirm">I sent it</button>
+        ${inv.file && how !== "graph_draft" ? `<button class="btn" data-act="inv-open">Open again</button>` : ""}${outlookLink}${emlLink}
+        <a class="btn" href="${url}" target="_blank" rel="noopener">View the mail</a>
+        <span class="spacer"></span><button class="btn" data-act="inv-back">Not sent: edit mail</button></div></div>`;
+  }
+  const ol = STATE?.outlook || {};
+  const testTo = ol.test_recipient || "";
   const noEmail = !c.email ? notice("need", "No email address yet.", "Add it in the Profile box before sending.") : "";
-  return `<div class="box" id="invite">${boxHead("Invitation mail", tag(c.invite.status === "draft" ? "Saved, not sent" : "Not sent yet", "need"))}
-    ${noEmail}
+  const failed = inv.last_error ? notice("error", `The last try did not send (${fmtTime(inv.last_error_at)}).`, `${inv.last_error} Fix it, then click Send mail again.`) : "";
+  const lt = inv.last_test;
+  const tested = lt ? notice("ok", `Test copy ${lt.status === "sent" ? "sent" : "opened"} for ${lt.sent_to} (${fmtTime(lt.at)}).`, "The student has not received this mail. Turn the test inbox off in Mail settings to send it for real.") : "";
+  const resending = inv.resend_of ? notice("ok", `Resending the mail first sent ${fmtTime(inv.resend_of)}.`, "Change it if needed, then click Send mail.") : "";
+  const L = c.mail_links || {};
+  const textOnly = c.email && (L.gmail || L.outlook_office) ? `<div class="small muted" style="margin-top:8px">Or write it yourself in
+      ${L.gmail ? `<a href="${esc(L.gmail)}" target="_blank" rel="noopener">Gmail</a>` : ""}${L.gmail && L.outlook_office ? " or " : ""}${L.outlook_office ? `<a href="${esc(L.outlook_office)}" target="_blank" rel="noopener">Outlook on the web</a>` : ""}
+      (uses the saved text; add the attachments yourself, then click Send mail here or mark it sent later).</div>` : "";
+  return `<div class="box" id="invite">${boxHead("Invitation mail", tag(inv.status === "draft" ? "Saved, not sent" : "Not sent yet", "need"))}
+    ${noEmail}${failed}${tested}${resending}
     <div class="grid two" style="align-items:start">
       <div class="form-row" style="margin:0"><label>To</label><div>${c.email ? `${esc(c.name)} &lt;${esc(c.email)}&gt;` : `<span class="muted">No email yet</span>`}</div></div>
       <div class="form-row" style="margin:0"><label for="inv-date">Visit date</label><input type="date" id="inv-date" value="${esc(v.visit_date || "")}">
@@ -904,8 +1067,11 @@ function inviteBox(c) {
     <div class="form-row"><label>Attachments</label>
       ${files.length ? files.map((f) => `<label class="check"><input type="checkbox" class="inv-file" value="${esc(f.name)}" ${(v.attachments || []).includes(f.name) ? "checked" : ""}> ${esc(f.name)} <span class="small muted">${fmtSize(f.size)}</span></label>`).join("")
         : `<div class="muted">No attachments uploaded yet. Add them in <a href="#/mailsettings">Mail settings</a>.</div>`}</div>
+    ${inviteHistory(inv)}
     <div class="actions"><button class="btn" data-act="inv-save">Save</button><button class="btn" data-act="inv-preview">Preview</button>
-      <span class="spacer"></span><button class="btn primary" data-act="inv-send" ${c.email && c.status !== "new" ? "" : "disabled"}>Send mail</button></div></div>`;
+      <span class="spacer"></span>${testTo ? `<span class="small" style="color:var(--fail)">Test inbox is on</span>` : ""}
+      <button class="btn primary" data-act="inv-send" ${c.email && c.status !== "new" ? "" : "disabled"}>${testTo ? `Send to TEST inbox (${esc(testTo)})` : "Send mail"}</button></div>
+    ${textOnly}</div>`;
 }
 function fmtSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
 function readInvite(app) {
@@ -935,7 +1101,11 @@ function bindInvite(c) {
       keep();
     };
   }
-  document.querySelectorAll("#reg input, #reg select").forEach((x) => { x.oninput = x.onchange = () => { UI.regEdit = readRegister(c.app_no); }; });
+  document.querySelectorAll("#reg .grid input, #reg .grid select").forEach((x) => { x.oninput = x.onchange = () => { UI.regEdit = readRegister(c.app_no); }; });
+  const rt = $("#reply-text"), rb = $("#reply-box");
+  if (rt) rt.oninput = () => { UI.replyFor = c.app_no; UI.replyText = rt.value; };
+  if (rb) rb.ontoggle = () => { UI.replyFor = c.app_no; UI.replyOpen = rb.open; };
+  bindHandForm(c);
 }
 const REG_FIELDS = [["ref_no", "No (reference)"], ["source", "Source"], ["university", "University"], ["technology", "Technology"],
   ["name", "Name"], ["nic", "NIC / PP"], ["address", "Address / Company"], ["vehicle", "Vehicle No"], ["tel", "Tel No"], ["laptop", "Laptop Serial No"]];
@@ -947,36 +1117,170 @@ function readRegister(app) {
 }
 function registerBox(c) {
   const r = UI.regEdit && UI.regEdit.app === c.app_no ? { ...c.register, ...UI.regEdit } : c.register;
-  const st = UI.mailStatuses || ["Not mailed", "Mail sent", "Replied", "Confirmed", "Not coming", "Visited"];
+  const st = UI.mailStatuses || ["Not mailed", "Opened, not confirmed", "Mail sent", "Replied", "Confirmed", "Not coming", "Visited"];
   const sug = UI.refSuggestion && !r.ref_no ? `<button class="btn link small" data-act="reg-ref" data-ref="${esc(UI.refSuggestion)}">Use next: ${esc(UI.refSuggestion)}</button>` : "";
+  const sugg = UI.regSuggested && UI.regSuggested.app === c.app_no ? UI.regSuggested.keys : [];
+  const hl = (k) => (sugg.includes(k) ? ` style="background:var(--need-bg);border-color:var(--need-line)"` : "");
+  const reply = UI.replyFor === c.app_no ? UI.replyText : "";
   return `<div class="box" id="reg">${boxHead("Register details", regTag(c.register.status))}
     <p class="small muted" style="margin-top:0">One row of the intern register. Fill NIC, Tel No and Laptop Serial No from the student's reply.
       Mail date: <b>${c.register.mail_date ? esc(shortDate(c.register.mail_date)) : "not sent yet"}</b></p>
+    <details class="field" id="reply-box" ${UI.replyFor === c.app_no && UI.replyOpen ? "open" : ""}><summary class="label" style="cursor:pointer">Paste the student's reply</summary>
+      <textarea id="reply-text" rows="6" style="margin-top:6px" placeholder="Paste the student's reply mail here">${esc(reply)}</textarea>
+      <div class="actions" style="margin-top:6px"><button class="btn small" data-act="reply-read">Fill the details from the reply</button>
+        <span class="small muted">The details found are marked. Check them, then click Save details.</span></div></details>
     <div class="grid two">${REG_FIELDS.map(([k, label]) => `<div class="form-row" style="margin:0 0 10px"><label for="reg-${k}">${esc(label)}</label>
-      <input type="text" id="reg-${k}" value="${esc(r[k] || "")}">${k === "ref_no" ? sug : ""}</div>`).join("")}
-      <div class="form-row" style="margin:0 0 10px"><label for="reg-status">Status</label><select id="reg-status">${st.map((s) => `<option ${s === r.status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></div></div>
+      <input type="text" id="reg-${k}" value="${esc(r[k] || "")}"${hl(k)}>${k === "ref_no" ? sug : ""}${k === "nic" && c.register.nic_hint ? `<div class="help">${esc(c.register.nic_hint)}</div>` : ""}</div>`).join("")}
+      <div class="form-row" style="margin:0 0 10px"><label for="reg-status">Status</label><select id="reg-status"${hl("status")}>${st.map((s) => `<option ${s === r.status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></div></div>
     <div class="actions"><button class="btn primary" data-act="reg-save">Save details</button></div></div>`;
 }
 
-const REG_SHOW = [["all", "All"], ["sent", "Mail sent"], ["not_sent", "Not mailed yet"]];
+const REG_SHOW = [["all", "All"], ["sent", "Mail sent"], ["not_sent", "Not mailed yet"], ["waiting", "Waiting for I sent it"]];
+function regQuery() {
+  return new URLSearchParams({ show: UI.regShow, q: UI.regQuery, date_from: UI.regFrom || "", date_to: UI.regTo || "",
+                               status: UI.regStatus || "", source: UI.regSource || "" });
+}
 async function pRegister(arg) {
   title("Register");
   UI.candidateFrom = "register";
   if (REG_SHOW.some((x) => x[0] === arg)) UI.regShow = arg;
-  const qs = new URLSearchParams({ show: UI.regShow, q: UI.regQuery });
+  if (!UI.regSel) UI.regSel = new Set();
+  const qs = regQuery();
   const r = await api(`/api/register?${qs}`);
   const cols = r.columns;
-  const cell = (row, k) => k === "mail_date" ? esc(shortDate(row[k])) : k === "status" ? regTag(row[k]) : k === "name" ? `<b>${esc(row[k] || "Reading…")}</b>` : esc(row[k] || "");
-  const table = r.rows.length ? `<div class="wide"><table class="t list reg-list"><thead><tr>${cols.map(([, l]) => `<th>${esc(l)}</th>`).join("")}</tr></thead><tbody>
-    ${r.rows.map((row) => `<tr class="click" data-href="#/candidate/${encodeURIComponent(row.app_no)}">${cols.map(([k]) => `<td>${cell(row, k)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
-    : empty(UI.regQuery ? "No row matches your search." : "No CVs yet. Add them on the Add CV page.");
-  setView(`<div class="box">${boxHead("Intern register", `<a class="btn" href="/api/register.xlsx?${qs}">Export to Excel</a>`)}
-    <div class="filters"><div class="tabs">${REG_SHOW.map(([k, l]) => `<button class="${UI.regShow === k ? "on" : ""}" data-act="reg-show" data-s="${k}">${esc(l)} (${esc(r.counts[k])})</button>`).join("")}</div>
+  const mailable = r.rows.filter((x) => x.can_mail).map((x) => x.app_no);
+  for (const a of [...UI.regSel]) if (!mailable.includes(a)) UI.regSel.delete(a);
+  const sel = UI.regSel;
+  const allOn = mailable.length > 0 && mailable.every((a) => sel.has(a));
+  const cell = (row, k) => k === "mail_date" ? esc(shortDate(row[k])) : k === "status" ? regTag(row[k]) + (row.test_sent ? " " + tag("Test sent") : "")
+    : k === "name" ? `<b>${esc(row[k] || "Reading…")}</b>` : esc(row[k] || "");
+  const table = r.rows.length ? `<div class="wide"><table class="t list reg-list"><thead><tr>
+      <th style="width:28px"><input type="checkbox" id="reg-all" title="Select every student who can be mailed" ${allOn ? "checked" : ""} ${mailable.length ? "" : "disabled"}></th>
+      ${cols.map(([, l]) => `<th>${esc(l)}</th>`).join("")}</tr></thead><tbody>
+    ${r.rows.map((row) => `<tr class="click" data-href="#/candidate/${encodeURIComponent(row.app_no)}">
+      <td>${row.can_mail ? `<input type="checkbox" class="reg-sel" value="${esc(row.app_no)}" ${sel.has(row.app_no) ? "checked" : ""} title="Select for invitations">` : ""}</td>
+      ${cols.map(([k]) => `<td>${cell(row, k)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
+    : empty(UI.regQuery || UI.regFrom || UI.regTo || UI.regStatus || UI.regSource ? "No row matches the filters." : "No CVs yet. Add them on the Add CV page.");
+  const opt = (list, val, all) => `<option value="">${esc(all)}</option>` + list.map((x) => `<option ${x === val ? "selected" : ""}>${esc(x)}</option>`).join("");
+  const filtered = UI.regFrom || UI.regTo || UI.regStatus || UI.regSource;
+  setView(`<div class="box">${boxHead("Intern register", `<a class="btn" href="/api/register.xlsx?${qs}">Export to Excel</a><a class="btn" href="/api/register.csv?${qs}">Export CSV</a>`)}
+    <div class="filters"><div class="tabs">${REG_SHOW.map(([k, l]) => `<button class="${UI.regShow === k ? "on" : ""}" data-act="reg-show" data-s="${k}">${esc(l)} (${esc(r.counts[k] ?? 0)})</button>`).join("")}</div>
       <input type="search" class="search" id="reg-q" placeholder="Search any column" value="${esc(UI.regQuery)}"></div>
-    <p class="small muted" style="margin:0 0 8px">Name, University and Technology come from the CV. Mail date is filled when the mail is sent. Open a row to fill the details from the student's reply.</p>
+    <div class="filters">
+      <label class="small muted" for="regf-from">Mail date from</label><input type="date" id="regf-from" style="width:auto" value="${esc(UI.regFrom || "")}">
+      <label class="small muted" for="regf-to">to</label><input type="date" id="regf-to" style="width:auto" value="${esc(UI.regTo || "")}">
+      <select id="regf-status" style="width:auto">${opt(r.statuses || [], UI.regStatus, "Any status")}</select>
+      <select id="regf-source" style="width:auto">${opt(r.sources || [], UI.regSource, "Any source")}</select>
+      ${filtered ? `<button class="btn small" data-act="reg-filters-clear">Clear filters</button>` : ""}</div>
+    <p class="small muted" style="margin:0 0 8px">Name, University and Technology come from the CV. Mail date is filled when the mail is sent. Open a row to fill the details from the student's reply. The exports use the filters shown here.</p>
+    <div class="actions" style="margin:0 0 8px"><button class="btn primary" data-act="bulk-open" ${sel.size ? "" : "disabled"}>Prepare invitations${sel.size ? ` (${sel.size})` : ""}</button>
+      ${sel.size ? `<button class="btn small" data-act="bulk-clear">Clear selection</button>` : `<span class="small muted">Tick students who have not been mailed to send them the invitation together.</span>`}</div>
     ${table}</div>`);
   const qi = $("#reg-q");
   qi.oninput = () => { UI.regQuery = qi.value; const pos = qi.selectionStart; lastHTML = ""; pRegister().then(() => { const n = $("#reg-q"); n.focus(); n.setSelectionRange(pos, pos); }); };
+  const refilter = () => { lastHTML = ""; pRegister(); };
+  $("#regf-from").onchange = (e) => { UI.regFrom = e.target.value; refilter(); };
+  $("#regf-to").onchange = (e) => { UI.regTo = e.target.value; refilter(); };
+  $("#regf-status").onchange = (e) => { UI.regStatus = e.target.value; e.target.blur(); refilter(); };
+  $("#regf-source").onchange = (e) => { UI.regSource = e.target.value; e.target.blur(); refilter(); };
+  document.querySelectorAll(".reg-sel").forEach((x) => { x.onchange = () => { x.checked ? sel.add(x.value) : sel.delete(x.value); refilter(); }; });
+  const all = $("#reg-all");
+  if (all) all.onchange = () => { mailable.forEach((a) => (all.checked ? sel.add(a) : sel.delete(a))); refilter(); };
+}
+
+// ---- several invitations at once
+async function openBulkDialog() {
+  const apps = [...(UI.regSel || [])];
+  if (!apps.length) return;
+  const s = await api("/api/mail/settings");
+  UI.mailFiles = s.attachments;
+  openDialog(`<h3>Prepare invitations for ${apps.length} student(s)</h3>
+    <div class="form-row"><label for="bulk-date">Visit date</label><input type="date" id="bulk-date" value="${esc(s.next_visit_day)}">
+      <div class="help">Written into every mail, for example ${esc(visitText(s.next_visit_day))}.</div></div>
+    <div class="form-row"><label>Attachments</label>${s.attachments.map((f) => `<label class="check"><input type="checkbox" class="bulk-file" value="${esc(f.name)}" checked> ${esc(f.name)} <span class="small muted">${fmtSize(f.size)}</span></label>`).join("") || `<div class="muted">No attachments.</div>`}</div>
+    <p class="small muted">Each mail is made from the template. A mail you already saved keeps its own text; only its visit date changes. Students who were already mailed are left out.</p>
+    <div class="actions"><button class="btn" data-dlg="no">Cancel</button><button class="btn primary" data-dlg="go">Prepare ${apps.length} mail(s)</button></div>`);
+  const body = $("#dialog-body");
+  body.querySelector('[data-dlg="no"]').onclick = closeDialog;
+  body.querySelector('[data-dlg="go"]').onclick = async () => {
+    try {
+      const r = await api("/api/mail/bulk/prepare", { method: "POST", body: { app_nos: apps, visit_date: $("#bulk-date").value,
+        attachments: [...document.querySelectorAll(".bulk-file:checked")].map((x) => x.value) } });
+      bulkReady(r);
+    } catch (e) { toast(e.message, true); }
+  };
+}
+function bulkResultRows(list) {
+  return `<table class="t" style="margin:8px 0"><tbody>${list.map((x) => `<tr><td>${esc(x.name || x.app_no)}</td>
+    <td>${x.ok ? tag(x.state || "Ready", x.state === "Failed" ? "fail" : x.state === "Opened" ? "need" : "pass") : tag("Left out", "need")} <span class="small muted">${esc(x.reason || x.detail || "")}</span></td></tr>`).join("")}</tbody></table>`;
+}
+function bulkReady(r) {
+  const n = r.ready.length;
+  const testTo = STATE?.outlook?.test_recipient || "";
+  const warn = testTo ? notice("error", "Test inbox is on.", `Every mail goes to ${testTo}, not to the students.`) : "";
+  if (!n) {
+    openDialog(`<h3>No mail is ready</h3>${bulkResultRows(r.results)}<div class="actions"><button class="btn primary" data-dlg="no">Close</button></div>`);
+    $("#dialog-body").querySelector('[data-dlg="no"]').onclick = closeDialog;
+    return;
+  }
+  if (r.direct) {
+    openDialog(`<h3>${n} mail(s) ready</h3>${warn}${bulkResultRows(r.results)}
+      <p class="small muted">They are sent one after another, a few seconds apart, from your ${r.mode === "smtp" ? "SMTP account" : "Microsoft account"}. You can close this window; sending goes on.</p>
+      <div class="actions"><button class="btn" data-dlg="no">Not now</button><button class="btn primary" data-dlg="go">Send ${n} mail(s)</button></div>`);
+    const body = $("#dialog-body");
+    body.querySelector('[data-dlg="no"]').onclick = () => { closeDialog(); lastHTML = ""; render(); };
+    body.querySelector('[data-dlg="go"]').onclick = async () => {
+      try { bulkProgress(await api("/api/mail/bulk/send", { method: "POST", body: { app_nos: r.ready } })); }
+      catch (e) { toast(e.message, true); }
+    };
+    return;
+  }
+  // The mail app opens one mail at a time.
+  const queue = r.results.filter((x) => x.ok).map((x) => ({ ...x, state: "Ready" }));
+  const show = () => {
+    const next = queue.find((x) => x.state === "Ready");
+    const opened = queue.filter((x) => x.state === "Opened");
+    openDialog(`<h3>Open the mails one at a time</h3>${warn}
+      <p class="small muted" style="margin-top:0">Each click opens the next mail in your mail app. Click Send there, then come back here. When all are sent, click I sent them all.</p>
+      ${bulkResultRows(queue.map((x) => ({ ...x, ok: true, detail: x.detail || "" })))}
+      <div class="actions"><button class="btn" data-dlg="no">Close</button>
+        ${opened.length ? `<button class="btn" data-dlg="all">I sent them all (${opened.length})</button>` : ""}
+        ${next ? `<button class="btn primary" data-dlg="next">Open next: ${esc(next.name)}</button>` : ""}</div>`);
+    const body = $("#dialog-body");
+    body.querySelector('[data-dlg="no"]').onclick = () => { closeDialog(); lastHTML = ""; render(); };
+    const nb = body.querySelector('[data-dlg="next"]');
+    if (nb) nb.onclick = async () => {
+      nb.disabled = true;
+      try {
+        const res = await api(`/api/candidates/${encodeURIComponent(next.app_no)}/mail/send`, { method: "POST", body: {} });
+        const i = res.invite;
+        next.state = i.test_only ? "Test copy" : i.status === "sent" ? "Sent" : "Opened";
+        next.detail = i.saved_only ? (i.note || "Download the .eml from the student's page.") : i.opened_in || "";
+      } catch (e) { next.state = "Failed"; next.detail = e.message; }
+      show();
+    };
+    const ab = body.querySelector('[data-dlg="all"]');
+    if (ab) ab.onclick = async () => {
+      for (const x of opened) {
+        try { await api(`/api/candidates/${encodeURIComponent(x.app_no)}/mail/confirm`, { method: "POST" }); x.state = "Sent"; }
+        catch (e) { x.detail = e.message; }
+      }
+      toast("Marked as sent."); show();
+    };
+  };
+  show();
+}
+function bulkProgress(job) {
+  const done = !job.running;
+  openDialog(`<h3>${done ? "Finished" : "Sending…"} ${esc(job.done)} of ${esc(job.total)}</h3>
+    <p class="small muted" style="margin-top:0">${esc(job.sent)} sent, ${esc(job.failed)} not sent.</p>
+    ${bulkResultRows(job.results.map((x) => ({ ...x, ok: true, state: x.ok ? "Sent" : "Failed" })))}
+    <div class="actions"><button class="btn ${done ? "primary" : ""}" data-dlg="no">Close</button></div>`);
+  $("#dialog-body").querySelector('[data-dlg="no"]').onclick = () => { closeDialog(); UI.regSel = new Set(); lastHTML = ""; render(); };
+  if (!done) setTimeout(async () => {
+    if (!$("#dialog").open) return;
+    try { bulkProgress(await api(`/api/mail/bulk/${encodeURIComponent(job.id)}`)); } catch { /* try again next time */ }
+  }, 1500);
 }
 
 async function pMailSettings() {
@@ -995,29 +1299,37 @@ async function pMailSettings() {
   const acctText = ol.account?.username
     ? `Connected: ${esc(ol.account.username)}`
     : eff === "smtp"
-    ? `Office 365 SMTP (${esc(senderAddr)})`
+    ? `${esc(SMTP_NAMES[ol.provider] || "SMTP")} (${esc(senderAddr)})`
     : eff === "outlook_app" && senderAddr
     ? `Sender: ${esc(senderAddr)} (Outlook / Mail app)`
     : eff === "outlook_app"
     ? "Enter your Outlook email below & save"
     : ".eml draft mode";
-  setView(`<div class="box">${boxHead("Attachments", `<span class="small muted">${s.attachments.length} file(s), ${fmtSize(total)} in total</span>`)}
+  const limit = ol.size_limit || 0;
+  const packed = Math.round(total * 4 / 3);
+  const sizeText = `${s.attachments.length} file(s), ${fmtSize(total)} in total` +
+    (limit ? ` (about ${fmtSize(packed)} in the mail; the limit is about ${fmtSize(limit)})` : "");
+  const ob = s.outbox || { files: 0, bytes: 0, keep_days: 90 };
+  setView(`<div class="box">${boxHead("Attachments", `<span class="small muted" style="${limit && packed > limit ? "color:var(--fail);font-weight:600" : ""}">${sizeText}</span>`)}
       <p class="small muted" style="margin-top:0">These files are attached to every invitation mail. The required files come with the template; add more files here if needed. You can untick a file for a single mail on the candidate page. To update a required file, add a newer file with the same name.</p>
       ${files}
       <div class="actions" style="margin-top:12px"><label class="btn" for="att-input">Add files</label>
         <input type="file" id="att-input" accept=".pdf,.xlsx,.xls,.docx,.doc" multiple hidden>
         <span class="small muted">PDF, Excel or Word, up to 10 MB each.</span></div></div>
-    <div class="box" id="outlook-box">${boxHead("Outlook sending", `<span class="small muted">${acctText}</span>`)}
+    <div class="box" id="outlook-box">${boxHead("Mail sending", `<span class="small muted">${acctText}</span>`)}
       ${_outlookControlsMarkup(ol, "ms-ol")}
       <div class="form-row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft)">
         <label for="ms-ol-probe">Send a test email (includes all ${s.attachments.length} attachments)</label>
         <div class="actions">
           <input type="email" id="ms-ol-probe" style="flex:1" value="${esc(ol.test_recipient || senderAddr)}" placeholder="your.email@outlook.com">
           <button type="button" class="btn" id="ms-ol-test">Send test mail</button>
-          <button type="button" class="btn primary" id="ms-ol-save">Save Outlook settings</button>
+          <button type="button" class="btn primary" id="ms-ol-save">Save mail settings</button>
         </div>
       </div>
     </div>
+    <div class="box">${boxHead("Saved mail copies", `<span class="small muted">${esc(ob.files)} file(s), ${fmtSize(ob.bytes || 0)}</span>`)}
+      <p class="small muted" style="margin-top:0">A copy of every invitation is kept in data/outbox/. Once a day, copies of sent mails older than ${esc(ob.keep_days)} days are made smaller: the attachments are taken out and their names are kept in the text. Mails that are not confirmed as sent are never changed.</p>
+      <div class="actions"><button class="btn" data-act="ms-shrink">Shrink old copies now</button></div></div>
     <div class="box">${boxHead("Mail template", `<span class="small muted">From: ${esc(s.sender)}</span>`)}
       <div class="form-row"><label for="ms-subject">Subject</label><input type="text" id="ms-subject" value="${esc(s.subject)}"></div>
       <div class="form-row"><label for="ms-body">Mail text</label><textarea id="ms-body" rows="26" style="font-family:inherit;font-size:13.5px">${esc(s.template)}</textarea>
@@ -1035,19 +1347,34 @@ async function pMailSettings() {
     lastHTML = ""; pMailSettings();
   };
   const olBox = $("#outlook-box");
+  $("#ms-ol-provider").onchange = (e) => _applyProvider("ms-ol", e.target.value);
+  $("#ms-ol-detect").onclick = async () => {
+    try {
+      const d = await api("/api/mail/detect", { method: "POST", body: { email: $("#ms-ol-semail").value.trim() } });
+      if (!d.found || !d.provider) { toast(`Could not tell the provider of ${d.domain}. Choose it from the list.`, true); return; }
+      $("#ms-ol-provider").value = d.provider;
+      _applyProvider("ms-ol", d.provider);
+      const names = { google: "Google", microsoft: "Microsoft", custom: "its own mail server" };
+      toast(d.provider === "custom"
+        ? `${d.domain} uses its own mail server (${(d.mx || []).slice(0, 2).join(", ")}). Ask IT for the SMTP server name, port and security, then Save.`
+        : `${d.domain} uses ${names[d.provider]}. Settings filled in — click Save mail settings.`);
+    } catch (e) { toast(e.message, true); }
+  };
   $("#ms-ol-mode").onchange = () => _syncOutlookModeUI("ms-ol");
   $("#ms-ol-sfallback").onchange = () => _syncOutlookModeUI("ms-ol");
   $("#ms-ol-save").onclick = async () => {
     try {
       await api("/api/outlook/settings", { method: "POST", body: _collectOutlookPayload("ms-ol") });
-      toast("Saved Outlook settings."); lastHTML = ""; await refreshState(); pMailSettings();
+      toast("Saved mail settings."); lastHTML = ""; await refreshState(); pMailSettings();
     } catch (e) { toast(e.message, true); }
   };
   $("#ms-ol-test").onclick = async () => {
     try {
       await api("/api/outlook/settings", { method: "POST", body: _collectOutlookPayload("ms-ol") });
       const r = await api("/api/mail/test", { method: "POST", body: { to: $("#ms-ol-probe").value } });
-      toast(r.how === "outlook_app" ? `Opened in ${r.opened_in || "Outlook / Mail"} for ${r.sent_to} (${r.attachments.length} attachments) — just click Send.`
+      toast(r.saved_only ? (r.note || `Saved to data/outbox/${r.file}. Open it in your mail app.`)
+        : r.how === "outlook_app" && r.sent_by_app ? `Test mail sent by ${r.opened_in || "Outlook"} to ${r.sent_to} (${r.attachments.length} attachments).`
+        : r.how === "outlook_app" ? `Opened in ${r.opened_in || "Outlook / Mail"} for ${r.sent_to} (${r.attachments.length} attachments) — just click Send.${r.note ? " " + r.note : ""}`
         : r.how === "eml" ? `Test .eml saved to data/outbox/${r.file} (${r.attachments.length} attachments).`
         : r.how === "graph_draft" ? `Test draft saved in Outlook for ${r.sent_to} (${r.attachments.length} attachments).`
         : `Test mail sent via ${r.how.toUpperCase()} to ${r.sent_to} (${r.attachments.length} attachments).`);
@@ -1295,6 +1622,18 @@ const ACTS = {
     act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/archive`, { method: "POST" }), "Archived.");
   },
   "restore": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/restore`, { method: "POST" }), "Restored. The Recruiter reads it again."),
+  "hand-add": () => act(async () => {
+    const r = await api("/api/mail/students", { method: "POST", body: readHand("hand") });
+    UI.hand = { source: UI.cvSource }; UI.handOpen = false; UI.poolShow = "recent";
+    return r;
+  }, (r) => `${r.app_no} added. Open it to send the invitation mail.`),
+  "hand-open": () => { UI.handFor = current.arg; lastHTML = ""; render(); },
+  "hand-cancel": () => { UI.handFor = null; UI.handFill = null; lastHTML = ""; render(); },
+  "hand-fill": () => act(async () => {
+    const r = await api(`/api/candidates/${encodeURIComponent(current.arg)}/by-hand`, { method: "POST", body: readHand("handc") });
+    UI.handFor = null; UI.handFill = null; UI.inviteEdit = null;
+    return r;
+  }, "Details saved. You can send the invitation mail now."),
   "toggle-cv": () => { UI.showCv = !UI.showCv; lastHTML = ""; render(); },
   "toggle-runs": () => { UI.showRuns = !UI.showRuns; lastHTML = ""; render(); },
   "edit-email": () => { UI.editEmail = true; lastHTML = ""; render().then(() => $("#email-input")?.focus()); },
@@ -1315,24 +1654,41 @@ const ACTS = {
   },
   "inv-send": async () => {
     const v = readInvite(current.arg);
-    const ok = await confirmBox({ heading: "Send this mail?", ok: "Send mail",
-      text: `To ${$("#invite .form-row div").textContent.trim()}, visit date ${visitText(v.visit_date) || "as written in the mail"}, with ${v.attachments.length} attachment(s).` });
+    const testTo = STATE?.outlook?.test_recipient || "";
+    const ok = await confirmBox(testTo
+      ? { heading: "Send a TEST copy?", ok: "Send test copy", danger: true,
+          text: `The test inbox is on in Mail settings, so this mail goes to ${testTo}, NOT to the student. The register does not change.` }
+      : { heading: "Send this mail?", ok: "Send mail",
+          text: `To ${$("#invite .form-row div").textContent.trim()}, visit date ${visitText(v.visit_date) || "as written in the mail"}, with ${v.attachments.length} attachment(s).` });
     if (!ok) return;
     act(async () => {
       const r = await api(`/api/candidates/${encodeURIComponent(current.arg)}/mail/send`, { method: "POST", body: v });
       UI.inviteEdit = null;
       return r;
     }, (r) => {
-      const how = r.invite.how;
-      if (how === "outlook_app") return `Opened in ${r.invite.opened_in || "Outlook / Mail"} for ${r.invite.sent_to || "candidate"} — click Send.`;
-      if (how === "graph") return `Mail sent via Outlook Graph to ${r.invite.sent_to || "candidate"}.`;
-      if (how === "graph_draft") return `Saved to Outlook Drafts for ${r.invite.sent_to || "candidate"}.`;
-      if (how === "smtp") return `Mail sent via Office 365 SMTP to ${r.invite.sent_to || "candidate"}.`;
-      return "Mail ready. It was saved to the outbox (.eml).";
+      const i = r.invite, how = i.how, to = i.sent_to || "the student";
+      if (i.test_only) return `Test copy for ${to}. The student did not get it.`;
+      if (i.saved_only) return i.note || "No mail app could open the mail. Download the .eml file.";
+      if (how === "outlook_app" && i.status === "sent") return `Sent by ${i.opened_in || "Outlook"} to ${to}.`;
+      if (how === "outlook_app") return `Opened in ${i.opened_in || "Outlook / Mail"} — click Send there, then click I sent it here.${i.note ? " " + i.note : ""}`;
+      if (how === "graph" || how === "graph_send") return `Mail sent via Microsoft Outlook to ${to}.`;
+      if (how === "graph_draft") return `Saved to Outlook Drafts for ${to}. Send it there, then click I sent it.`;
+      if (how === "smtp") return `Mail sent by SMTP to ${to}.`;
+      return "Saved as an .eml file in the outbox. Send it from your mail app, then click I sent it.";
     });
   },
   "inv-open": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/mail/open`, { method: "POST" }),
-    (r) => `Opened in ${r.opened_in || "Outlook / Mail"} — click Send.`),
+    (r) => `Opened in ${r.opened_in || "Outlook / Mail"}.${r.note ? " " + r.note : ""}`),
+  "inv-confirm": () => act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/mail/confirm`, { method: "POST" }),
+    "Marked as sent. The register now shows the mail date."),
+  "inv-back": async () => {
+    if (!(await confirmBox({ heading: "The mail was not sent?", text: "It goes back to a draft so you can change it and send it again. Nothing is sent now.", ok: "Back to draft" }))) return;
+    act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/mail/back-to-draft`, { method: "POST" }), "The mail is a draft again.");
+  },
+  "inv-resend": async () => {
+    if (!(await confirmBox({ heading: "Send this mail again?", text: "The mail becomes a draft again so you can change it, then click Send mail. The earlier send stays in the history.", ok: "Resend" }))) return;
+    act(() => api(`/api/candidates/${encodeURIComponent(current.arg)}/mail/resend`, { method: "POST" }), "Change the mail if needed, then click Send mail.");
+  },
   "open-draft-app": (b) => act(async () => {
     const r = await api(`/api/drafts/${b.dataset.id}/open`, { method: "POST" });
     if (!r.ok) throw new Error(r.error || "Could not open Outlook / Mail.");
@@ -1353,8 +1709,27 @@ const ACTS = {
   "reg-ref": (b) => { $("#reg-ref_no").value = b.dataset.ref; UI.regEdit = readRegister(current.arg); },
   "reg-save": () => act(async () => {
     const r = await api(`/api/candidates/${encodeURIComponent(current.arg)}/register`, { method: "POST", body: readRegister(current.arg) });
-    UI.regEdit = null; UI.refSuggestion = r.ref_suggestion;
-  }, "Register details saved."),
+    UI.regEdit = null; UI.refSuggestion = r.ref_suggestion; UI.regSuggested = null;
+    return r;
+  }, (r) => (r.register.warnings || []).length ? `Saved. Please check: ${r.register.warnings.join(" ")}` : "Register details saved."),
+  "reply-read": async () => {
+    const app = current.arg;
+    const text = $("#reply-text").value;
+    try {
+      const r = await api(`/api/candidates/${encodeURIComponent(app)}/reply`, { method: "POST", body: { text } });
+      const keys = Object.keys(r.fields);
+      UI.regEdit = { ...readRegister(app), ...r.fields };
+      UI.regSuggested = { app, keys };
+      UI.replyFor = app; UI.replyText = text; UI.replyOpen = true;
+      const n = Object.keys(r.found_by).length;
+      toast(n ? `${n} detail(s) filled from the reply. Check the marked fields, then click Save details.${r.notes.length ? " " + r.notes.join(" ") : ""}`
+        : `No details were found in the reply. ${r.notes.join(" ")}`, !n);
+      lastHTML = ""; render();
+    } catch (e) { toast(e.message, true); }
+  },
+  "bulk-open": () => openBulkDialog().catch((e) => toast(e.message, true)),
+  "bulk-clear": () => { UI.regSel = new Set(); lastHTML = ""; pRegister(); },
+  "reg-filters-clear": () => { UI.regFrom = UI.regTo = UI.regStatus = UI.regSource = ""; lastHTML = ""; pRegister(); },
   "reg-show": (b) => { UI.regShow = b.dataset.s; history.replaceState(null, "", "#/register"); current = { page: "register", arg: "" }; lastHTML = ""; pRegister(); },
   "att-remove": async (b) => {
     const original = b.textContent.trim() === "Use the original";
@@ -1362,6 +1737,8 @@ const ACTS = {
       : { heading: "Remove this attachment?", text: `${b.dataset.n} will no longer be attached to new mails.`, ok: "Remove", danger: true }))) return;
     act(async () => { const r = await api(`/api/mail/attachments/${encodeURIComponent(b.dataset.n)}/remove`, { method: "POST" }); UI.mailFiles = r.attachments; }, "Attachment removed.");
   },
+  "ms-shrink": () => act(() => api("/api/mail/outbox/shrink", { method: "POST" }),
+    (r) => r.shrunk ? `${r.shrunk} old copy(ies) made smaller, ${fmtSize(r.saved_bytes)} saved.` : "No copies are old enough to shrink yet."),
   "ms-save": () => act(() => api("/api/mail/settings", { method: "POST", body: { subject: $("#ms-subject").value, template: $("#ms-body").value } }), "Template saved. New mails use it."),
   "ms-reset": async () => {
     if (!(await confirmBox({ heading: "Go back to the original template?", text: "Your changes to the subject and the mail text will be removed.", ok: "Go back", danger: true }))) return;

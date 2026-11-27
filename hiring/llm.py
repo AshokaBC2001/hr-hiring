@@ -6,6 +6,7 @@ environment variable). Nothing is sent outside this computer.
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Callable
 
@@ -22,11 +23,42 @@ class ModelUnavailable(Exception):
 _backend: Callable[[list, bool], str] | None = None
 _json_mode_supported = True
 _health_cache: tuple[float, dict] = (0.0, {})
+_model_id_cache: tuple[str, str] = ("", "")  # (base_url, discovered_model_id)
+_client_lock = threading.Lock()
+_http_client: httpx.Client | None = None
+_client_url: str = ""
 
 
 def set_backend(fn: Callable[[list, bool], str] | None) -> None:
     global _backend
     _backend = fn
+
+
+def close() -> None:
+    """Close the shared persistent HTTP client pool."""
+    global _http_client, _client_url
+    with _client_lock:
+        if _http_client is not None:
+            _http_client.close()
+        _http_client = None
+        _client_url = ""
+
+
+def _get_client() -> httpx.Client:
+    """Reuse a pooled keep-alive httpx.Client for local or remote LLM requests."""
+    global _http_client, _client_url
+    base = config.MODEL_URL.rstrip("/")
+    with _client_lock:
+        if _http_client is not None and _client_url == base:
+            return _http_client
+        if _http_client is not None:
+            _http_client.close()
+        _http_client = httpx.Client(
+            timeout=httpx.Timeout(config.MODEL_TIMEOUT, connect=5.0),
+            limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+        )
+        _client_url = base
+        return _http_client
 
 
 def _prepare(messages: list[dict]) -> list[dict]:
@@ -39,6 +71,14 @@ def _prepare(messages: list[dict]) -> list[dict]:
     elif system:
         rest.insert(0, {"role": "user", "content": system})
     return rest
+
+
+def _headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    api_key = getattr(config, "MODEL_API_KEY", "")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 def chat(messages: list[dict], json_mode: bool = True, max_tokens: int | None = None) -> str:
@@ -56,13 +96,15 @@ def chat(messages: list[dict], json_mode: bool = True, max_tokens: int | None = 
     if json_mode and _json_mode_supported:
         payload["response_format"] = {"type": "json_object"}
     url = f"{config.MODEL_URL}/v1/chat/completions"
+    client = _get_client()
+    hdrs = _headers()
     try:
-        r = httpx.post(url, json=payload, timeout=config.MODEL_TIMEOUT)
+        r = client.post(url, json=payload, headers=hdrs, timeout=config.MODEL_TIMEOUT)
         if r.status_code == 400 and "response_format" in payload:
             # An older server may not accept response_format. Try once without it.
             _json_mode_supported = False
             payload.pop("response_format")
-            r = httpx.post(url, json=payload, timeout=config.MODEL_TIMEOUT)
+            r = client.post(url, json=payload, headers=hdrs, timeout=config.MODEL_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         return data["choices"][0]["message"]["content"] or ""
@@ -75,25 +117,33 @@ def chat(messages: list[dict], json_mode: bool = True, max_tokens: int | None = 
 
 
 def health(force: bool = False) -> dict:
-    """Is the model server up? Cached for 10 seconds."""
-    global _health_cache
+    """Is the model server up? Cached for 15 seconds with keep-alive connection pooling."""
+    global _health_cache, _model_id_cache
     if _backend is not None:
         return {"ok": True, "model": "test model", "detail": "Test model in use."}
     t, cached = _health_cache
-    if not force and cached and time.time() - t < 10:
+    if not force and cached and time.time() - t < 15:
         return cached
+    base = config.MODEL_URL.rstrip("/")
     result = {"ok": False, "model": config.MODEL_NAME, "detail": ""}
+    client = _get_client()
+    hdrs = _headers()
     try:
-        r = httpx.get(f"{config.MODEL_URL}/health", timeout=3)
+        r = client.get(f"{base}/health", headers=hdrs, timeout=3)
         if r.status_code == 200:
             result["ok"] = True
-            try:
-                m = httpx.get(f"{config.MODEL_URL}/v1/models", timeout=3).json()
-                ids = [x.get("id", "") for x in m.get("data", [])]
-                if ids and ids[0]:
-                    result["model"] = ids[0].split("/")[-1]
-            except Exception:
-                pass
+            if _model_id_cache[0] == base and _model_id_cache[1] and not force:
+                result["model"] = _model_id_cache[1]
+            else:
+                try:
+                    m = client.get(f"{base}/v1/models", headers=hdrs, timeout=3).json()
+                    ids = [x.get("id", "") for x in m.get("data", [])]
+                    if ids and ids[0]:
+                        model_id = ids[0].split("/")[-1]
+                        result["model"] = model_id
+                        _model_id_cache = (base, model_id)
+                except Exception:
+                    pass
             result["detail"] = "Model server is running."
         elif r.status_code == 503:
             result["detail"] = "Model server is starting (the model is still loading)."

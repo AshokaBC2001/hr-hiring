@@ -1,0 +1,14 @@
+To: Ayesha Fernando <ayesha.fernando@example.com>
+Subject: Job Offer - MLOps
+Released: 2026-11-17T23:32:21
+
+Dear Ayesha,
+
+We are delighted to inform you that you have been selected for the MLOps position!
+
+Your work ID is 1001. Please use this ID in all communications.
+
+Our team will contact you shortly with the onboarding details.
+
+Kind regards,
+Hiring Team

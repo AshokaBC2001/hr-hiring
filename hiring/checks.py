@@ -6,6 +6,7 @@ to plain rules or a template and marks the result for a person to look at.
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 from typing import Any
@@ -36,8 +37,17 @@ def parse_json_object(text: str) -> dict:
 
 
 # ---- "is this really written in the CV?" ----------------------------------------
+@functools.lru_cache(maxsize=4096)
+def _norm_short(s: str) -> str:
+    return re.sub(r"[^a-z0-9+#]+", " ", s.lower()).strip()
+
+
 def norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9+#]+", " ", (s or "").lower()).strip()
+    if not s:
+        return ""
+    if len(s) <= 120:
+        return _norm_short(s)
+    return re.sub(r"[^a-z0-9+#]+", " ", s.lower()).strip()
 
 
 class CVText:
@@ -47,6 +57,7 @@ class CVText:
         self.raw = text or ""
         self.norm = " " + norm(self.raw) + " "
         self.tokens = set(self.norm.split())
+        self.prefixes5 = {t[:5] for t in self.tokens if len(t) >= 5}
         self.digits = re.sub(r"\D", "", self.raw)
 
     def has(self, phrase: str) -> bool:
@@ -62,7 +73,7 @@ class CVText:
         for w in words:
             if w in self.tokens or w + "s" in self.tokens or (w.endswith("s") and w[:-1] in self.tokens):
                 found += 1
-            elif len(w) > 4 and any(t.startswith(w[:5]) for t in self.tokens):
+            elif len(w) > 4 and w[:5] in self.prefixes5:
                 found += 1   # "deployed" and "deployment" share a stem
         if len(words) <= 3:
             return found == len(words)

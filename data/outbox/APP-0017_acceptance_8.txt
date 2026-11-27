@@ -1,0 +1,14 @@
+To: Oshan Pathirana <oshan.p@example.com>
+Subject: Job Offer - Web Development
+Released: 2026-11-17T23:37:22
+
+Dear Oshan,
+
+We are delighted to inform you that you have been selected for the Web Development position!
+
+Please use work ID 1004 in all communications.
+
+Your team will contact you with the onboarding details.
+
+Kind regards,
+Hiring Team

@@ -1,0 +1,95 @@
+Dear Intern
+
+Congratulations on being selected as a software intern at SLT!
+
+Please read the email carefully.
+
+SLT offers six months software internship opportunities for university students who are required to complete a mandatory internship as part of their degree program.
+These internships provide practical industry experience and help students develop their technical and professional skills.
+
+Please visit SLT Head office ,Lotus Road , Colombo 1.
+Date -{visit_date}
+Time 9.30 AM.
+Location:  9th Floor , Digital Platforms Development Section
+
+Please  bring the following documents with you:
+(All the documents are compulsory for registration purpose)
+if  all the documents are not available please  do not visit SLT.You can visit next following Tuesday.
+
+(1) printed copy of this email
+(2) CV
+(3) Internship request letter  issued by the University. (Addressed to Engineer Talent Development Section, Sri Lanka Telecom,Internship period should be 6 months)
+(4) Police report. (Original Needed. Photocopy will not be accepted)
+(5) Signed trainee Guideline document
+(6) Photocopy of NIC
+(7) Letters of recommendation from two non-related referees.
+(8) A Note book
+(9) Please ensure that you wear office attire when coming to the office
+
+Please register your details in the following web portal. (Please refer individual user manual.pdf)
+https://ternboard.slt.com.lk/
+
+Please go through the SLT intern onboarding guide before your visit.
+https://sltinternguide.vercel.app
+
+To confirm your internship, please send the required details below today so that we can arrange your visitor entry pass. If the details are not submitted today, your application may not be considered for the internship.
+(Please Keep the same subject as received — do not change it.
+Please send as a reply for this email.)
+
+(1) Name
+(2) NIC No
+(3) Contact No
+(4) Laptop SerialNo
+
+Develop the Hospital Management System application, host it, and submit the URL before your arrival (mandatory).
+Developing the application entirely using AI tools is not recommended.
+
+Please subscribe our channel.
+https://www.youtube.com/@DigitalSerendib
+
+Please go through Bitbucket lesson (mandatory)
+https://www.youtube.com/watch?v=YDqF1Gg1L0c&t=12s
+
+Please go through following link for the guidelines (mandatory)
+https://www.youtube.com/watch?v=CJqzS_8Emt0
+
+Please go through following link for the Talent Hub  guidelines (mandatory)
+https://youtu.be/nFdC4IzZOoM?si=D8Lmy6RemYkBvsTo
+
+Please go through following link for the  Devops session (mandatory)
+https://www.youtube.com/watch?v=OZ9zW03GgEo&t=159s
+https://www.youtube.com/watch?v=c2QQ15cmhqI&t=181s
+
+Please go through following link for Internship system Launching ceremony
+https://www.youtube.com/watch?v=UZvqUTU7kp8
+
+Please go through following link for Queue Management System Appreciation ceremony
+https://youtu.be/TTarD5afN44?si=gwqFqL9h2InHGWCe
+
+All the SE and QA interns please go through following Lesson series.(mandatory)
+https://www.youtube.com/playlist?list=PLEKX3jmmeYEFxacYilJVZwUZSrMh8w9D2
+https://www.youtube.com/playlist?list=PLEKX3jmmeYEH9e0J3nhsCrceMQM_vOeEo
+https://www.youtube.com/watch?v=DPddX1GDY_s&list=PLEKX3jmmeYEFDxPs7Qrt8DyqAZPTF2ZIc
+
+All the SE Interns you need to learn Flutter development.Please go through following lesson series.
+https://www.youtube.com/watch?v=nLIQIHf9qII&list=PLEKX3jmmeYEGXBcjr_x3-OAmu-lDcptbD
+
+Please go through the Figma Tutorial .
+https://youtu.be/ib0oxZhZKYQ?si=j0sVLcbGO4jRmjh1
+
+Please read the trainee guidelines carefully. If you agree with the terms, proceed with applying for the internship.
+
+Very Important Note
+
+It is unpaid internship .You are required to visit SLT all 5 days a week. If you are unable to meet this requirement, please do not join as a  intern with us.
+
+During the internship period, you are required to update the TalentHub logbook daily and participate  in meetings regularly.
+Failure to comply with these requirements may result in the termination of your internship.
+
+Thank you
+
+Best regards
+Giridaran
+
+CONFIDENTIALITY NOTICE
+This message is intended only for the use of the individual or entity to which it is addressed and may contain information that is confidential and/or privileged. If you are not the intended recipient please delete the original message and any copy of it from your computer system. You are hereby notified that any dissemination, distribution or copying of this communication is strictly prohibited unless proper authorization has been obtained for such action. If you have received this communication in error, please notify the sender immediately. Although SLT attempts to sweep e-mail and attachments for viruses, it does not guarantee that both are virus-free and accepts no liability for any damage sustained as a result of viruses.

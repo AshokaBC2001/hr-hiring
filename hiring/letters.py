@@ -223,12 +223,21 @@ def read(c: db.Candidate) -> bytes:
 def email_file(c: db.Candidate, subject: str, body: str, attach: bool) -> bytes:
     """A real email file (.eml). Double-click it to open it in Mail or Outlook; the placement
     letter is inside it as an attachment. Nothing is sent by the system."""
+    from . import outlook
+
     msg = EmailMessage()
-    msg["From"] = settings()["sender"]
+    ol = outlook.raw_settings()
+    if ol.get("sender_email"):
+        from email.utils import formataddr
+
+        msg["From"] = formataddr((ol.get("from_name") or "HR Hiring Team", ol["sender_email"]))
+    else:
+        msg["From"] = settings()["sender"]
     msg["To"] = f"{c.name} <{c.email}>"
     msg["Subject"] = subject
     msg["Date"] = formatdate(localtime=True)
     msg["X-Unsent"] = "1"                 # Outlook opens it as a message ready to send
+    msg["X-Uniform-Type-Identifier"] = "com.apple.mail-draft"  # Apple Mail opens it editable to send
     msg.set_content(body)
     if attach:
         msg.add_attachment(read(c), maintype="application", subtype="pdf", filename=file_name(c))

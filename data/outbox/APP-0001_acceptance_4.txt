@@ -1,0 +1,12 @@
+To: Sanduni Perera <sanduni.perera@example.com>
+Subject: Welcome to AI/ML!
+Released: 2026-11-17T23:33:33
+
+Dear Sanduni,
+
+We are delighted to inform you that you have been selected for the AI/ML area. Please use work ID 1002 in all your communications.
+
+Your team will contact you with the onboarding details shortly.
+
+Kind regards,
+Hiring Team

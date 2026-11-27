@@ -1,0 +1,12 @@
+To: Hiruni Dissanayake <hiruni.d@example.com>
+Subject: Welcome to the Flutter Area!
+Released: 2026-11-17T23:34:59
+
+Dear Hiruni,
+
+Congratulations on your selection for the Flutter area! Please use work ID 1003 in all your communications.
+
+Your team will contact you with the onboarding details shortly.
+
+Kind regards,
+Hiring Team
